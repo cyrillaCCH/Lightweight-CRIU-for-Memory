@@ -1999,6 +1999,278 @@ err:
 	return cr_pre_dump_finish(ret);
 }
 
+static int mem_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
+{
+	pid_t pid = item->pid->real;
+	struct vm_area_list vmas;
+	struct parasite_ctl *parasite_ctl;
+	int ret = -1;
+	struct parasite_dump_misc misc;
+	struct mem_dump_ctl mdc;
+
+	vm_area_list_init(&vmas);
+
+	pr_info("========================================\n");
+	pr_info("Pre-dumping task (pid: %d comm: %s)\n", pid, __task_comm_info(pid));
+	pr_info("========================================\n");
+
+	/*
+	 * Add pidfd of task to pidfd_store if it is initialized.
+	 * This pidfd will be used in the next pre-dump/dump iteration
+	 * in detect_pid_reuse().
+	 */
+	ret = pidfd_store_add(pid);
+	if (ret)
+		goto err;
+
+	if (item->pid->state == TASK_STOPPED) {
+		pr_warn("Stopped tasks are not supported\n");
+		return 0;
+	}
+
+	if (item->pid->state == TASK_DEAD)
+		return 0;
+
+	ret = collect_mappings(pid, &vmas, NULL);
+	if (ret) {
+		pr_err("Collect mappings (pid: %d) failed with %d\n", pid, ret);
+		goto err;
+	}
+
+	ret = -1;
+	parasite_ctl = parasite_infect_seized(pid, item, &vmas);
+	if (!parasite_ctl) {
+		pr_err("Can't infect (pid: %d) with parasite\n", pid);
+		goto err_free;
+	}
+
+	ret = parasite_fixup_vdso(parasite_ctl, pid, &vmas);
+	if (ret) {
+		pr_err("Can't fixup vdso VMAs (pid: %d)\n", pid);
+		goto err_cure;
+	}
+
+	ret = parasite_dump_misc_seized(parasite_ctl, &misc);
+	if (ret) {
+		pr_err("Can't dump misc (pid: %d)\n", pid);
+		goto err_cure;
+	}
+
+	ret = predump_task_files(pid);
+	if (ret) {
+		pr_err("Pre-dumping files failed (pid: %d)\n", pid);
+		goto err_cure;
+	}
+
+	item->pid->ns[0].virt = misc.pid;
+
+	mdc.pre_dump = true;
+	mdc.lazy = false;
+	mdc.stat = NULL;
+	mdc.parent_ie = parent_ie;
+
+	ret = parasite_dump_pages_seized(item, &vmas, &mdc, parasite_ctl);
+	if (ret)
+		goto err_cure;
+
+	if (compel_cure_remote(parasite_ctl))
+		pr_err("Can't cure (pid: %d) from parasite\n", pid);
+err_free:
+	free_mappings(&vmas);
+err:
+	return ret;
+
+err_cure:
+	if (compel_cure(parasite_ctl))
+		pr_err("Can't cure (pid: %d) from parasite\n", pid);
+	goto err_free;
+}
+
+static int cr_mem_dump_finish(int status)
+{
+	InventoryEntry he = INVENTORY_ENTRY__INIT;
+	struct pstree_item *item;
+	int ret;
+
+	/*
+	 * Restore registers for tasks only. The threads have not been
+	 * infected. Therefore, the thread register sets have not been changed.
+	 */
+	ret = arch_set_thread_regs(root_item, false);
+	if (ret)
+		goto err;
+
+	ret = inventory_save_uptime(&he);
+	if (ret)
+		goto err;
+
+	he.has_pre_dump_mode = true;
+	he.pre_dump_mode = opts.pre_dump_mode;
+
+	pstree_switch_state(root_item, TASK_ALIVE);
+
+	timing_stop(TIME_FROZEN);
+
+	if (status < 0) {
+		ret = status;
+		goto err;
+	}
+
+	pr_info("Pre-dumping tasks' memory\n");
+	for_each_pstree_item(item) {
+		struct parasite_ctl *ctl = dmpi(item)->parasite_ctl;
+		struct page_pipe *mem_pp;
+		struct page_xfer xfer;
+
+		if (!ctl)
+			continue;
+
+		pr_info("\tPre-dumping %d\n", vpid(item));
+		timing_start(TIME_MEMWRITE);
+		ret = open_page_xfer(&xfer, CR_FD_PAGEMAP, vpid(item));
+		if (ret < 0)
+			goto err;
+
+		mem_pp = dmpi(item)->mem_pp;
+
+		if (opts.pre_dump_mode == PRE_DUMP_READ) {
+			timing_stop(TIME_MEMWRITE);
+			ret = page_xfer_predump_pages(item->pid->real, &xfer, mem_pp);
+		} else {
+			ret = page_xfer_dump_pages(&xfer, mem_pp);
+		}
+
+		xfer.close(&xfer);
+
+		if (ret)
+			goto err;
+
+		timing_stop(TIME_MEMWRITE);
+
+		destroy_page_pipe(mem_pp);
+		if (compel_cure_local(ctl))
+			pr_err("Can't cure local: something happened with mapping?\n");
+	}
+
+	free_pstree(root_item);
+	seccomp_free_entries();
+
+	if (irmap_predump_run()) {
+		ret = -1;
+		goto err;
+	}
+
+err:
+	if (unsuspend_lsm())
+		ret = -1;
+
+	if (disconnect_from_page_server())
+		ret = -1;
+
+	if (bfd_flush_images())
+		ret = -1;
+
+	if (write_img_inventory(&he))
+		ret = -1;
+
+	if (ret)
+		pr_err("Pre-dumping FAILED.\n");
+	else {
+		write_stats(DUMP_STATS);
+		pr_info("Pre-dumping finished successfully\n");
+	}
+	return ret;
+}
+
+int cr_mem_dump_tasks(pid_t pid)
+{
+	InventoryEntry *parent_ie = NULL;
+	struct pstree_item *item;
+	int ret = -1;
+
+	/*
+	 * We might need a lot of pipes to fetch huge number of pages to dump.
+	 */
+	rlimit_unlimit_nofile();
+
+	root_item = alloc_pstree_item();
+	if (!root_item)
+		goto err;
+	root_item->pid->real = pid;
+
+	if (!opts.track_mem) {
+		pr_info("Enforcing memory tracking for pre-dump.\n");
+		opts.track_mem = true;
+	}
+
+	if (opts.final_state == TASK_DEAD) {
+		pr_info("Enforcing tasks run after pre-dump.\n");
+		opts.final_state = TASK_ALIVE;
+	}
+
+	if (init_stats(DUMP_STATS))
+		goto err;
+
+	if (cr_plugin_init(CR_PLUGIN_STAGE__PRE_DUMP))
+		goto err;
+
+	if (lsm_check_opts())
+		goto err;
+
+	if (irmap_load_cache())
+		goto err;
+
+	if (cpu_init())
+		goto err;
+
+	if (vdso_init_dump())
+		goto err;
+
+	if (connect_to_page_server_to_send() < 0)
+		goto err;
+
+	if (setup_alarm_handler())
+		goto err;
+
+	if (collect_pstree())
+		goto err;
+
+	if (collect_pstree_ids_predump())
+		goto err;
+
+	if (collect_namespaces(false) < 0)
+		goto err;
+
+	if (collect_and_suspend_lsm() < 0)
+		goto err;
+
+	/* Errors handled later in detect_pid_reuse */
+	parent_ie = get_parent_inventory();
+
+	for_each_pstree_item(item)
+		if (pre_dump_one_task(item, parent_ie))
+			goto err;
+
+	if (parent_ie) {
+		inventory_entry__free_unpacked(parent_ie, NULL);
+		parent_ie = NULL;
+	}
+
+	ret = cr_dump_shmem();
+	if (ret)
+		goto err;
+
+	if (irmap_predump_prep())
+		goto err;
+
+	ret = 0;
+err:
+	if (parent_ie)
+		inventory_entry__free_unpacked(parent_ie, NULL);
+
+	return cr_pre_dump_finish(ret);
+}
+
 static int cr_lazy_mem_dump(void)
 {
 	struct pstree_item *item;

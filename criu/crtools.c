@@ -60,8 +60,12 @@ static int image_dir_mode(char *argv[], int optind)
 	case CR_DUMP:
 		/* fallthrough */
 	case CR_PRE_DUMP:
+		/* fallthrough */
+	case CR_MEM_DUMP:
 		return O_DUMP;
 	case CR_RESTORE:
+		/* fallthrough */
+	case CR_MEM_RESTORE:
 		return O_RSTR;
 	case CR_CPUINFO:
 		if (!strcmp(argv[optind + 1], "dump"))
@@ -102,6 +106,10 @@ static int parse_criu_mode(char *mode)
 		opts.mode = CR_EXEC_DEPRECATED;
 	else if (!strcmp(mode, "show"))
 		opts.mode = CR_SHOW_DEPRECATED;
+	else if (!strcmp(mode, "mem-dump"))
+		opts.mode = CR_MEM_DUMP;
+	else if (!strcmp(mode, "mem-restore"))
+		opts.mode = CR_MEM_RESTORE;
 	else
 		return -1;
 
@@ -303,6 +311,18 @@ int main(int argc, char *argv[], char *envp[])
 		}
 
 		return cr_pre_dump_tasks(opts.tree_id) != 0;
+	}
+
+	if (opts.mode == CR_MEM_DUMP) {
+		if (!opts.tree_id)
+			goto opt_pid_missing;
+
+		if (opts.lazy_pages) {
+			pr_err("Cannot mem-dump with --lazy-pages\n");
+			return 1;
+		}
+
+		return cr_mem_dump_tasks(opts.tree_id) != 0;
 	}
 
 	if (opts.mode == CR_RESTORE) {
