@@ -558,7 +558,7 @@ static int dump_task_mm(pid_t pid, const struct proc_pid_stat *stat, const struc
 	if (get_task_auxv(pid, &mme))
 		goto err;
 
-	if (dump_task_exe_link(pid, &mme))
+	if (opts.mode != CR_MEM_DUMP && dump_task_exe_link(pid, &mme))
 		goto err;
 
 	ret = pb_write_one(img_from_set(imgset, CR_FD_MM), &mme, PB_MM);
@@ -2005,13 +2005,14 @@ static int mem_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie
 	struct vm_area_list vmas;
 	struct parasite_ctl *parasite_ctl;
 	int ret = -1;
+	struct cr_imgset *cr_imgset = NULL;
 	struct parasite_dump_misc misc;
 	struct mem_dump_ctl mdc;
 
 	vm_area_list_init(&vmas);
 
 	pr_info("========================================\n");
-	pr_info("Pre-dumping task (pid: %d comm: %s)\n", pid, __task_comm_info(pid));
+	pr_info("Mem-dumping task (pid: %d comm: %s)\n", pid, __task_comm_info(pid));
 	pr_info("========================================\n");
 
 	/*
@@ -2022,11 +2023,6 @@ static int mem_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie
 	ret = pidfd_store_add(pid);
 	if (ret)
 		goto err;
-
-	if (item->pid->state == TASK_STOPPED) {
-		pr_warn("Stopped tasks are not supported\n");
-		return 0;
-	}
 
 	if (item->pid->state == TASK_DEAD)
 		return 0;
@@ -2056,12 +2052,6 @@ static int mem_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie
 		goto err_cure;
 	}
 
-	ret = predump_task_files(pid);
-	if (ret) {
-		pr_err("Pre-dumping files failed (pid: %d)\n", pid);
-		goto err_cure;
-	}
-
 	item->pid->ns[0].virt = misc.pid;
 
 	mdc.pre_dump = true;
@@ -2075,9 +2065,25 @@ static int mem_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie
 
 	if (compel_cure_remote(parasite_ctl))
 		pr_err("Can't cure (pid: %d) from parasite\n", pid);
+
+	cr_imgset = cr_task_imgset_open(vpid(item), O_DUMP);
+	if (!cr_imgset)
+		goto err_cure;
+
+	pr_info("Obtaining task stat ... \n");
+	ret = parse_pid_stat(pid, &pps_buf);
+	if (ret < 0)
+		goto err;
+
+	ret = dump_task_mm(root_item->pid->real, &pps_buf, &misc, &vmas, cr_imgset);
+	if (ret) {
+		pr_err("Dump mappings (pid: %d) failed with %d\n", pid, ret);
+		goto err;
+	}
 err_free:
 	free_mappings(&vmas);
 err:
+	close_cr_imgset(&cr_imgset);
 	return ret;
 
 err_cure:
@@ -2086,11 +2092,158 @@ err_cure:
 	goto err_free;
 }
 
+static int get_path(pid_t pid, char *path, char *libc_path) {
+    char libc_link_path[PATH_MAX], exe[PATH_MAX];
+	ssize_t len;
+	FILE *fp;
+
+	snprintf(exe, sizeof(exe), "/proc/%d/exe", pid);
+
+    len = readlink(exe, path, PATH_MAX - 1);
+
+    if (len == -1) {
+        pr_err("Error reading symbolic link for executable");
+        return -1;
+    }
+
+    path[len] = '\0';
+    pr_debug("Program path: %s, PID: %d\n", path, pid);
+
+    fp = popen("ldd /bin/ls | grep libc | cut -d \" \" -f 3", "r");
+    if (!fp) {
+        pr_err("Error running ldd command");
+        return -1;
+    }
+
+    if (fscanf(fp, "%s", libc_link_path) != 1) {
+        pr_err("Error reading libc path from ldd output\n");
+        pclose(fp);
+        return -1;
+    }
+
+    if (pclose(fp) == -1) {
+        pr_err("Error closing pipe");
+        return -1;
+    }
+
+    if (!realpath(libc_link_path, libc_path)) {
+        pr_err("Error resolving libc realpath");
+        return -1;
+    }
+
+    pr_debug("libc path: %s\n", libc_path);
+    return 0;
+}
+
+static int count_maps_lines(pid_t pid) {
+    int ret = 0;
+    char line[PATH_MAX + 128];
+	char maps[PATH_MAX];
+	FILE *fp;
+
+	sprintf(maps, "/proc/%d/maps", pid);
+
+	fp = fopen(maps, "r");
+    if (fp == NULL) {
+        pr_err("Error opening file");
+        return -1;
+    }
+    while (fgets(line, PATH_MAX + 128, fp))
+        ret++;
+
+    fclose(fp);
+    return ret;
+}
+
+static int parse_maps(pid_t pid, char *path, char *libc_path, void *addr[][2]) {
+	char maps[PATH_MAX];
+    FILE *fp;
+	void *start, *end, *offset;
+    unsigned int inode_num, dev_max, dev_min;
+    char r, w, x, s, file_name[PATH_MAX];
+    char line[PATH_MAX + 128];
+    int idx;
+
+	sprintf(maps, "/proc/%d/maps", pid);
+	fp = fopen(maps, "r");
+    if (fp == NULL) {
+        pr_err("Error opening map file");
+        return -1;
+    }
+
+	idx = 0;
+    while (fgets(line, PATH_MAX + 128, fp)) {
+		int n;
+		char tmp[64];
+        n = sscanf(line, "%p-%p %c%c%c%c %p %u:%u %u %s\n", &start, &end, &r, &w, &x, &s, &offset, &dev_max, &dev_min, &inode_num, file_name);
+        if (n < 2) {
+            pr_perror("Error parsing line: %s", line);
+            fclose(fp);
+            return -1;
+        }
+
+		if (s == 's')
+			continue;
+		if ((!strcmp(file_name, libc_path) || !strcmp(file_name, path)) && r == 'r' && w == '-' && x == 'x' && s == 'p')
+			continue;
+
+		if ((n = sscanf(file_name, "[%s", tmp)) < 0) {
+			pr_perror("sscanf error");
+			return -1;
+		}
+		if (n == 1 && strcmp(tmp, "stack]") && strcmp(tmp, "heap]"))
+			continue;
+
+        addr[idx][0] = start;
+        addr[idx++][1] = end;
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+static int mem_unmap(pid_t pid, int num_lines) {
+	char path[PATH_MAX], libc_path[PATH_MAX];
+	long int ret;
+	int state;
+	void *addr[num_lines][2];
+	struct parasite_ctl *ctl;
+
+	if (get_path(pid, path, libc_path) < 0)
+		return -1;
+
+	memset(addr, 0, sizeof(void*) * num_lines * 2);
+	if (parse_maps(pid, path, libc_path, addr))
+		return -1;
+
+	state = compel_stop_task(pid);
+	if (state < 0)
+		pr_err("Can't stop task");
+
+	ctl = compel_prepare(pid);
+	if (!ctl)
+		pr_err("Can't prepare for infection");
+	ret = -1;
+	for (int i = 0; i < num_lines && addr[i][0] != NULL; i++) {
+		if ((compel_syscall(ctl, __NR_munmap, &ret, (unsigned long)addr[i][0], addr[i][1]-addr[i][0], 0, 0, 0, 0) < 0) || ret < 0)
+			pr_err("Unmap error %d %p\n", i, addr[i][0]);
+		if (ret < 0)
+			break;
+	}
+	if (compel_cure(ctl))
+		pr_err("Can't cure victim");
+
+	return ret;
+}
+
 static int cr_mem_dump_finish(int status)
 {
 	InventoryEntry he = INVENTORY_ENTRY__INIT;
-	struct pstree_item *item;
 	int ret;
+	int num_lines;
+	struct parasite_ctl *ctl = dmpi(root_item)->parasite_ctl;
+	struct page_pipe *mem_pp;
+	struct page_xfer xfer;
 
 	/*
 	 * Restore registers for tasks only. The threads have not been
@@ -2107,7 +2260,7 @@ static int cr_mem_dump_finish(int status)
 	he.has_pre_dump_mode = true;
 	he.pre_dump_mode = opts.pre_dump_mode;
 
-	pstree_switch_state(root_item, TASK_ALIVE);
+	pstree_switch_state(root_item, TASK_STOPPED);
 
 	timing_stop(TIME_FROZEN);
 
@@ -2116,41 +2269,43 @@ static int cr_mem_dump_finish(int status)
 		goto err;
 	}
 
-	pr_info("Pre-dumping tasks' memory\n");
-	for_each_pstree_item(item) {
-		struct parasite_ctl *ctl = dmpi(item)->parasite_ctl;
-		struct page_pipe *mem_pp;
-		struct page_xfer xfer;
+	pr_info("Dumping task's memory\n");
 
-		if (!ctl)
-			continue;
+	if (!ctl)
+		goto out;
 
-		pr_info("\tPre-dumping %d\n", vpid(item));
-		timing_start(TIME_MEMWRITE);
-		ret = open_page_xfer(&xfer, CR_FD_PAGEMAP, vpid(item));
-		if (ret < 0)
-			goto err;
+	pr_info("\tMem-dumping %d\n", vpid(root_item));
+	timing_start(TIME_MEMWRITE);
+	ret = open_page_xfer(&xfer, CR_FD_PAGEMAP, vpid(root_item));
+	if (ret < 0)
+		goto err;
 
-		mem_pp = dmpi(item)->mem_pp;
+	mem_pp = dmpi(root_item)->mem_pp;
 
-		if (opts.pre_dump_mode == PRE_DUMP_READ) {
-			timing_stop(TIME_MEMWRITE);
-			ret = page_xfer_predump_pages(item->pid->real, &xfer, mem_pp);
-		} else {
-			ret = page_xfer_dump_pages(&xfer, mem_pp);
-		}
-
-		xfer.close(&xfer);
-
-		if (ret)
-			goto err;
-
+	if (opts.pre_dump_mode == PRE_DUMP_READ) {
 		timing_stop(TIME_MEMWRITE);
-
-		destroy_page_pipe(mem_pp);
-		if (compel_cure_local(ctl))
-			pr_err("Can't cure local: something happened with mapping?\n");
+		ret = page_xfer_predump_pages(root_item->pid->real, &xfer, mem_pp);
+	} else {
+		ret = page_xfer_dump_pages(&xfer, mem_pp);
 	}
+
+	xfer.close(&xfer);
+
+	if (ret)
+		goto err;
+
+	timing_stop(TIME_MEMWRITE);
+
+	destroy_page_pipe(mem_pp);
+
+	if (compel_cure_local(ctl))
+		pr_err("Can't cure local: something happened with mapping?\n");
+
+	num_lines = count_maps_lines(root_item->pid->real);
+	if (num_lines < 0)
+		return -1;
+	mem_unmap(root_item->pid->real, num_lines);
+out:
 
 	free_pstree(root_item);
 	seccomp_free_entries();
@@ -2161,12 +2316,6 @@ static int cr_mem_dump_finish(int status)
 	}
 
 err:
-	if (unsuspend_lsm())
-		ret = -1;
-
-	if (disconnect_from_page_server())
-		ret = -1;
-
 	if (bfd_flush_images())
 		ret = -1;
 
@@ -2174,18 +2323,16 @@ err:
 		ret = -1;
 
 	if (ret)
-		pr_err("Pre-dumping FAILED.\n");
+		pr_err("Mem-dumping FAILED.\n");
 	else {
 		write_stats(DUMP_STATS);
-		pr_info("Pre-dumping finished successfully\n");
+		pr_info("Mem-dumping finished successfully\n");
 	}
 	return ret;
 }
 
 int cr_mem_dump_tasks(pid_t pid)
 {
-	InventoryEntry *parent_ie = NULL;
-	struct pstree_item *item;
 	int ret = -1;
 
 	/*
@@ -2198,23 +2345,20 @@ int cr_mem_dump_tasks(pid_t pid)
 		goto err;
 	root_item->pid->real = pid;
 
-	if (!opts.track_mem) {
-		pr_info("Enforcing memory tracking for pre-dump.\n");
-		opts.track_mem = true;
+	if (opts.track_mem) {
+		pr_info("Enforcing disable memory tracking for mem-dump.\n");
+		opts.track_mem = false;
 	}
 
-	if (opts.final_state == TASK_DEAD) {
-		pr_info("Enforcing tasks run after pre-dump.\n");
-		opts.final_state = TASK_ALIVE;
+	if (opts.final_state != TASK_STOPPED) {
+		pr_info("Enforcing tasks stop after pre-dump.\n");
+		opts.final_state = TASK_STOPPED;
 	}
 
 	if (init_stats(DUMP_STATS))
 		goto err;
 
 	if (cr_plugin_init(CR_PLUGIN_STAGE__PRE_DUMP))
-		goto err;
-
-	if (lsm_check_opts())
 		goto err;
 
 	if (irmap_load_cache())
@@ -2224,9 +2368,6 @@ int cr_mem_dump_tasks(pid_t pid)
 		goto err;
 
 	if (vdso_init_dump())
-		goto err;
-
-	if (connect_to_page_server_to_send() < 0)
 		goto err;
 
 	if (setup_alarm_handler())
@@ -2241,23 +2382,7 @@ int cr_mem_dump_tasks(pid_t pid)
 	if (collect_namespaces(false) < 0)
 		goto err;
 
-	if (collect_and_suspend_lsm() < 0)
-		goto err;
-
-	/* Errors handled later in detect_pid_reuse */
-	parent_ie = get_parent_inventory();
-
-	for_each_pstree_item(item)
-		if (pre_dump_one_task(item, parent_ie))
-			goto err;
-
-	if (parent_ie) {
-		inventory_entry__free_unpacked(parent_ie, NULL);
-		parent_ie = NULL;
-	}
-
-	ret = cr_dump_shmem();
-	if (ret)
+	if (mem_dump_one_task(root_item, NULL))
 		goto err;
 
 	if (irmap_predump_prep())
@@ -2265,10 +2390,7 @@ int cr_mem_dump_tasks(pid_t pid)
 
 	ret = 0;
 err:
-	if (parent_ie)
-		inventory_entry__free_unpacked(parent_ie, NULL);
-
-	return cr_pre_dump_finish(ret);
+	return cr_mem_dump_finish(ret);
 }
 
 static int cr_lazy_mem_dump(void)
