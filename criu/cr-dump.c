@@ -2182,16 +2182,20 @@ static int parse_maps(pid_t pid, char *path, char *libc_path, void *addr[][2]) {
             return -1;
         }
 
-		if (s == 's')
+		if (s == 's') // shared memory
 			continue;
-		if ((!strcmp(file_name, libc_path) || !strcmp(file_name, path)) && r == 'r' && w == '-' && x == 'x' && s == 'p')
+
+		if (!strncmp(file_name, "/SYSV", 5)) // SYSV shared memory
+			continue;
+
+		if ((!strcmp(file_name, libc_path) || !strcmp(file_name, path)) && r == 'r' && w == '-' && x == 'x' && s == 'p') // .text of libc and binary
 			continue;
 
 		if ((n = sscanf(file_name, "[%s", tmp)) < 0) {
 			pr_perror("sscanf error");
 			return -1;
 		}
-		if (n == 1 && strcmp(tmp, "stack]") && strcmp(tmp, "heap]"))
+		if (n == 1 && strcmp(tmp, "stack]") && strcmp(tmp, "heap]")) // special sections, such as [vdso] and [vvar] (except [stack] and [heap])
 			continue;
 
         addr[idx][0] = start;
