@@ -2027,7 +2027,12 @@ static int mem_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie
 	if (item->pid->state == TASK_DEAD)
 		return 0;
 
-	ret = collect_mappings(pid, &vmas, NULL);
+	pr_info("Obtaining task stat ... \n");
+	ret = parse_pid_stat(pid, &pps_buf);
+	if (ret < 0)
+		goto err;
+
+	ret = collect_mappings(pid, &vmas, dump_filemap);
 	if (ret) {
 		pr_err("Collect mappings (pid: %d) failed with %d\n", pid, ret);
 		goto err;
@@ -2056,7 +2061,7 @@ static int mem_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie
 
 	mdc.pre_dump = true;
 	mdc.lazy = false;
-	mdc.stat = NULL;
+	mdc.stat = &pps_buf;
 	mdc.parent_ie = parent_ie;
 
 	ret = parasite_dump_pages_seized(item, &vmas, &mdc, parasite_ctl);
@@ -2069,11 +2074,6 @@ static int mem_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie
 	cr_imgset = cr_task_imgset_open(vpid(item), O_DUMP);
 	if (!cr_imgset)
 		goto err_cure;
-
-	pr_info("Obtaining task stat ... \n");
-	ret = parse_pid_stat(pid, &pps_buf);
-	if (ret < 0)
-		goto err;
 
 	ret = dump_task_mm(root_item->pid->real, &pps_buf, &misc, &vmas, cr_imgset);
 	if (ret) {
@@ -2102,7 +2102,7 @@ static int get_path(pid_t pid, char *path, char *libc_path) {
     len = readlink(exe, path, PATH_MAX - 1);
 
     if (len == -1) {
-        pr_err("Error reading symbolic link for executable");
+        pr_err("Error reading symbolic link for executable\n");
         return -1;
     }
 
@@ -2111,7 +2111,7 @@ static int get_path(pid_t pid, char *path, char *libc_path) {
 
     fp = popen("ldd /bin/ls | grep libc | cut -d \" \" -f 3", "r");
     if (!fp) {
-        pr_err("Error running ldd command");
+        pr_err("Error running ldd command\n");
         return -1;
     }
 
@@ -2122,12 +2122,12 @@ static int get_path(pid_t pid, char *path, char *libc_path) {
     }
 
     if (pclose(fp) == -1) {
-        pr_err("Error closing pipe");
+        pr_err("Error closing pipe\n");
         return -1;
     }
 
     if (!realpath(libc_link_path, libc_path)) {
-        pr_err("Error resolving libc realpath");
+        pr_err("Error resolving libc realpath\n");
         return -1;
     }
 
@@ -2135,27 +2135,7 @@ static int get_path(pid_t pid, char *path, char *libc_path) {
     return 0;
 }
 
-static int count_maps_lines(pid_t pid) {
-    int ret = 0;
-    char line[PATH_MAX + 128];
-	char maps[PATH_MAX];
-	FILE *fp;
-
-	sprintf(maps, "/proc/%d/maps", pid);
-
-	fp = fopen(maps, "r");
-    if (fp == NULL) {
-        pr_err("Error opening file");
-        return -1;
-    }
-    while (fgets(line, PATH_MAX + 128, fp))
-        ret++;
-
-    fclose(fp);
-    return ret;
-}
-
-static int parse_maps(pid_t pid, char *path, char *libc_path, void *addr[][2]) {
+static int parse_maps_dump(pid_t pid, char *path, char *libc_path, void *addr[][2]) {
 	char maps[PATH_MAX];
     FILE *fp;
 	void *start, *end, *offset;
@@ -2167,7 +2147,7 @@ static int parse_maps(pid_t pid, char *path, char *libc_path, void *addr[][2]) {
 	sprintf(maps, "/proc/%d/maps", pid);
 	fp = fopen(maps, "r");
     if (fp == NULL) {
-        pr_err("Error opening map file");
+        pr_err("Error opening map file\n");
         return -1;
     }
 
@@ -2177,7 +2157,7 @@ static int parse_maps(pid_t pid, char *path, char *libc_path, void *addr[][2]) {
 		char tmp[64];
         n = sscanf(line, "%p-%p %c%c%c%c %p %u:%u %u %s\n", &start, &end, &r, &w, &x, &s, &offset, &dev_max, &dev_min, &inode_num, file_name);
         if (n < 2) {
-            pr_perror("Error parsing line: %s", line);
+            pr_perror("Error parsing line: %s\n", line);
             fclose(fp);
             return -1;
         }
@@ -2192,7 +2172,7 @@ static int parse_maps(pid_t pid, char *path, char *libc_path, void *addr[][2]) {
 			continue;
 
 		if ((n = sscanf(file_name, "[%s", tmp)) < 0) {
-			pr_perror("sscanf error");
+			pr_perror("sscanf error\n");
 			return -1;
 		}
 		if (n == 1 && strcmp(tmp, "stack]") && strcmp(tmp, "heap]")) // special sections, such as [vdso] and [vvar] (except [stack] and [heap])
@@ -2217,16 +2197,16 @@ static int mem_unmap(pid_t pid, int num_lines) {
 		return -1;
 
 	memset(addr, 0, sizeof(void*) * num_lines * 2);
-	if (parse_maps(pid, path, libc_path, addr))
+	if (parse_maps_dump(pid, path, libc_path, addr))
 		return -1;
 
 	state = compel_stop_task(pid);
 	if (state < 0)
-		pr_err("Can't stop task");
+		pr_err("Can't stop task\n");
 
 	ctl = compel_prepare(pid);
 	if (!ctl)
-		pr_err("Can't prepare for infection");
+		pr_err("Can't prepare for infection\n");
 	ret = -1;
 	for (int i = 0; i < num_lines && addr[i][0] != NULL; i++) {
 		if ((compel_syscall(ctl, __NR_munmap, &ret, (unsigned long)addr[i][0], addr[i][1]-addr[i][0], 0, 0, 0, 0) < 0) || ret < 0)
@@ -2235,7 +2215,7 @@ static int mem_unmap(pid_t pid, int num_lines) {
 			break;
 	}
 	if (compel_cure(ctl))
-		pr_err("Can't cure victim");
+		pr_err("Can't cure victim\n");
 
 	return ret;
 }
@@ -2248,6 +2228,8 @@ static int cr_mem_dump_finish(int status)
 	struct parasite_ctl *ctl = dmpi(root_item)->parasite_ctl;
 	struct page_pipe *mem_pp;
 	struct page_xfer xfer;
+
+	close_cr_imgset(&glob_imgset);
 
 	/*
 	 * Restore registers for tasks only. The threads have not been
@@ -2355,14 +2337,14 @@ int cr_mem_dump_tasks(pid_t pid)
 	}
 
 	if (opts.final_state != TASK_STOPPED) {
-		pr_info("Enforcing tasks stop after pre-dump.\n");
+		pr_info("Enforcing tasks stop after mem-dump.\n");
 		opts.final_state = TASK_STOPPED;
 	}
 
 	if (init_stats(DUMP_STATS))
 		goto err;
 
-	if (cr_plugin_init(CR_PLUGIN_STAGE__PRE_DUMP))
+	if (cr_plugin_init(CR_PLUGIN_STAGE__MEM_DUMP))
 		goto err;
 
 	if (irmap_load_cache())
@@ -2384,6 +2366,10 @@ int cr_mem_dump_tasks(pid_t pid)
 		goto err;
 
 	if (collect_namespaces(false) < 0)
+		goto err;
+
+	glob_imgset = cr_glob_imgset_open(O_DUMP);
+	if (!glob_imgset)
 		goto err;
 
 	if (mem_dump_one_task(root_item, NULL))

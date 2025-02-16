@@ -2889,3 +2889,23 @@ int parse_uptime(uint64_t *upt)
 	fclose(f);
 	return 0;
 }
+
+int count_maps_lines(pid_t pid) {
+    int ret = 0;
+    char line[PATH_MAX + 128];
+	char maps[PATH_MAX];
+	FILE *fp;
+
+	sprintf(maps, "/proc/%d/maps", pid);
+
+	fp = fopen(maps, "r");
+    if (fp == NULL) {
+        pr_err("Error opening file\n");
+        return -1;
+    }
+    while (fgets(line, PATH_MAX + 128, fp))
+        ret++;
+
+    fclose(fp);
+    return ret;
+}
