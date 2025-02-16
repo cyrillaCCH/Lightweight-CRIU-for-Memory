@@ -7,6 +7,12 @@
 #include "kerndat.h"
 #include "images/mm.pb-c.h"
 #include "images/core.pb-c.h"
+#include "page.h"
+#include "types.h"
+
+#define NUM_VMAS 16
+#define PATH_LEN 128
+#define TOTAL_VMAS 256
 
 struct task_entries {
 	int nr_threads, nr_tasks, nr_helpers;
@@ -92,5 +98,19 @@ static inline void unlock_last_pid(void)
 {
 	mutex_unlock(&task_entries->last_pid_mutex);
 }
+
+struct mem_rst_args
+{
+	union {
+		struct {
+			void *addr;
+			unsigned char page_content[PAGE_SIZE];
+		};
+		struct {
+			VmaEntry vmas[NUM_VMAS];
+			char path[NUM_VMAS][PATH_LEN];
+		};
+	};
+};
 
 #endif /* __CR_RST_INFO_H__ */

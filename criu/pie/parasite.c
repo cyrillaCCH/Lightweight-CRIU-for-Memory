@@ -841,6 +841,114 @@ static int parasite_dump_cgroup(struct parasite_dump_cgroup_args *args)
 	return 0;
 }
 
+static int parasite_restore_file_priv_vmas(struct mem_rst_args *args)
+{
+	int i, fd;
+	VmaEntry *vma;
+
+	for (i = 0; i < NUM_VMAS; i++)
+	{
+		if (args->vmas[i].start == 0)
+			continue;
+
+		vma = &args->vmas[i];
+
+		fd = sys_open(args->path[i], vma->fdflags, 0);
+		if (fd < 0)
+		{
+			pr_err("Can't open file %s for mmap\n", args->path[i]);
+			return -1;
+		}
+
+		if (sys_mmap((void*)vma->start, vma->end - vma->start, vma->prot | PROT_WRITE, vma->flags | MAP_FILE | MAP_FIXED, fd, vma->pgoff) < 0)
+		{
+			pr_err("Can't mmap VMA at %lx-%lx -> %s\n", args->vmas[i].start, args->vmas[i].end, args->path[i]);
+			return -1;
+		}
+
+		if (sys_close(fd) < 0)
+		{
+			pr_err("Can't close file %s\n", args->path[i]);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static int parasite_restore_memory(struct mem_rst_args *args)
+{
+	int i;
+	unsigned char *dst = (unsigned char*)args->addr;
+
+	for (i = 0; i < PAGE_SIZE; i++)
+	{
+		dst[i] = args->page_content[i];
+	}
+
+	return 0;
+}
+
+static int parasite_restore_vma_settings(struct mem_rst_args *args)
+{
+	int i;
+	long ret;
+	VmaEntry *vma;
+
+	// Walk though all VMAs again to drop PROT_WRITE if it was not there.
+	pr_info("Restore memory prot\n");
+	for (i = 0; i < NUM_VMAS; i++) {
+		if (args->vmas[i].start == 0)
+			continue;
+
+		vma = &args->vmas[i];
+
+		if (!(vma_entry_is(vma, VMA_AREA_REGULAR)))
+			continue;
+
+		if ((vma->prot & PROT_WRITE) || (vma->status & VMA_NO_PROT_WRITE))
+			continue;
+
+
+		ret = sys_mprotect(decode_pointer(vma->start), vma_entry_len(vma), vma->prot);
+		if (ret < 0)
+		{
+			pr_err("mprotect failed %d\n", i);
+			return -1;
+		}
+	}
+	pr_info("Memory prot restored\n");
+
+	// Restore madivse() bits
+	pr_info("Restore madvise() bits\n");
+	for (i = 0; i < NUM_VMAS; i++) {
+		unsigned long m;
+
+		if (args->vmas[i].start == 0)
+			continue;
+
+		vma = &args->vmas[i];
+
+		if (!vma->has_madv || !vma->madv)
+			continue;
+
+		for (m = 0; m < sizeof(vma->madv) * 8; m++) {
+			if (vma->madv & (1ul << m)) {
+				ret = sys_madvise(vma->start, vma_entry_len(vma), m);
+				if (ret < 0)
+				{
+					pr_err("madvise(%lu, %lu, %lu) failed with %ld\n",
+					       vma->start, vma_entry_len(vma), m, ret);
+					return -1;
+				}
+			}
+		}
+	}
+	pr_info("madvise() bits restored\n");
+
+	return 0;
+}
+
 void parasite_cleanup(void)
 {
 	if (mprotect_args) {
@@ -892,6 +1000,15 @@ int parasite_daemon_cmd(int cmd, void *args)
 		break;
 	case PARASITE_CMD_DUMP_CGROUP:
 		ret = parasite_dump_cgroup(args);
+		break;
+	case PARASITE_CMD_RESTORE_FILE_PRIV_VMAS:
+		ret = parasite_restore_file_priv_vmas(args);
+		break;
+	case PARASITE_CMD_RESTORE_PAGES:
+		ret = parasite_restore_memory(args);
+		break;
+	case PARASITE_CMD_RESTORE_VMA_SETTINGS:
+		ret = parasite_restore_vma_settings(args);
 		break;
 	default:
 		pr_err("Unknown command in parasite daemon thread leader: %d\n", cmd);

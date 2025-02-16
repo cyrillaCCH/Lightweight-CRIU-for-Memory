@@ -340,6 +340,15 @@ int main(int argc, char *argv[], char *envp[])
 		return ret != 0;
 	}
 
+	if (opts.mode == CR_MEM_RESTORE) {
+		if (!opts.tree_id)
+			goto opt_pid_missing;
+
+		ret = cr_mem_restore_tasks(opts.tree_id);
+
+		return ret != 0;
+	}
+
 	if (opts.mode == CR_LAZY_PAGES)
 		return cr_lazy_pages(opts.daemon_mode) != 0;
 

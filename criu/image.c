@@ -47,6 +47,17 @@ int check_img_inventory(bool restore)
 	if (pb_read_one(img, &he, PB_INVENTORY) < 0)
 		goto out_close;
 
+	if (opts.mode == CR_MEM_RESTORE) {
+		if (he->has_pre_dump_mode) {
+			ret = 0;
+			goto out_close;
+		}
+		else {
+			pr_err("Invalid image.\n");
+			goto out_err;
+		}
+	}
+
 	if (!he->has_fdinfo_per_id || !he->fdinfo_per_id) {
 		pr_err("Too old image, no longer supported\n");
 		goto out_close;

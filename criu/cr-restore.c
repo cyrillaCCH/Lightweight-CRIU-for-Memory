@@ -56,6 +56,7 @@
 #include "tty.h"
 #include "cpu.h"
 #include "file-lock.h"
+#include "files-reg.h"
 #include "vdso.h"
 #include "stats.h"
 #include "tun.h"
@@ -80,7 +81,10 @@
 #include "bpfmap.h"
 #include "apparmor.h"
 #include "pidfd.h"
+#include "pagemap.h"
 
+#include "parasite.h"
+#include "pie/parasite-blob.h"
 #include "parasite-syscall.h"
 #include "files-reg.h"
 #include <compel/plugins/std/syscall-codes.h>
@@ -2345,6 +2349,414 @@ int prepare_dummy_task_state(struct pstree_item *pi)
 	core_entry__free_unpacked(core, NULL);
 
 	return 0;
+}
+
+static int rm_imgs(pid_t pid)
+{
+	char cmd[64];
+	sprintf(cmd, "rm -f %s/inventory.img", opts.imgs_dir);
+	if (system(cmd) < 0)
+		return -1;
+	sprintf(cmd, "rm -f %s/irmap-cache", opts.imgs_dir);
+	if (system(cmd) < 0)
+		return -1;
+	sprintf(cmd, "rm -f %s/stats-dump", opts.imgs_dir);
+	if (system(cmd) < 0)
+		return -1;
+	sprintf(cmd, "rm -f %s/pages-1.img", opts.imgs_dir);
+	if (system(cmd) < 0)
+		return -1;
+	sprintf(cmd, "rm -f %s/mm-%d.img", opts.imgs_dir, pid);
+	if (system(cmd) < 0)
+		return -1;
+	sprintf(cmd, "rm -f %s/files.img", opts.imgs_dir);
+	if (system(cmd) < 0)
+		return -1;
+	sprintf(cmd, "rm -f %s/pagemap-%d.img", opts.imgs_dir, pid);
+	if (system(cmd) < 0)
+		return -1;
+
+	return 0;
+}
+
+static int count_threads(pid_t pid)
+{
+	char path[PATH_MAX];
+    struct dirent *entry;
+    int count = 0;
+	DIR *dir;
+
+    snprintf(path, sizeof(path), "/proc/%d/task", pid);
+    dir = opendir(path);
+    if (!dir) {
+        pr_err("opendir failed\n");
+        return -1;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] != '.') // Skip "." and ".."
+            count++;
+    }
+
+	pr_debug("Found %d threads\n", count);
+
+    closedir(dir);
+    return count;
+}
+
+static int parse_maps_restore(pid_t pid, void *addr[][2]) {
+	char maps[PATH_MAX];
+    FILE *fp;
+	void *start, *end, *offset;
+    unsigned int inode_num, dev_max, dev_min;
+    char r, w, x, s, file_name[PATH_MAX];
+    char line[PATH_MAX + 128];
+    int idx;
+
+	sprintf(maps, "/proc/%d/maps", pid);
+	fp = fopen(maps, "r");
+    if (fp == NULL) {
+        pr_err("Error opening map file\n");
+        return -1;
+    }
+
+	idx = 0;
+    while (fgets(line, PATH_MAX + 128, fp)) {
+		int n;
+        n = sscanf(line, "%p-%p %c%c%c%c %p %u:%u %u %s\n", &start, &end, &r, &w, &x, &s, &offset, &dev_max, &dev_min, &inode_num, file_name);
+        if (n < 2) {
+            pr_perror("Error parsing line: %s\n", line);
+            fclose(fp);
+            return -1;
+        }
+
+        addr[idx][0]= start;
+		addr[idx++][1]= end;
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+static int read_mm(pid_t pid, MmEntry **mm)
+{
+	struct cr_img *img;
+	long ret;
+
+	img = open_image(CR_FD_MM, O_RSTR, pid);
+	if (!img)
+		return -1;
+
+	ret = pb_read_one_eof(img, mm, PB_MM);
+	close_image(img);
+	if (ret == -1)
+		return -1;
+
+	return 0;
+}
+
+static int restore_memory(pid_t pid)
+{
+	int state;
+	int i, j, k;
+	int num_lines = count_maps_lines(pid);
+	int num_threads = count_threads(pid);
+	char maps[32];
+	void *addr[num_lines][2];
+	char path[TOTAL_VMAS][PATH_LEN];
+	struct parasite_ctl *ctl;
+	struct infect_ctx *ictx;
+	long ret;
+	struct page_read pr;
+	VmaEntry *vma;
+	unsigned long va;
+	unsigned int nr_restored = 0;
+	MmEntry *mm;
+	struct mem_rst_args *arg;
+
+	memset(addr, 0, sizeof(void*) * num_lines * 2);
+	if (parse_maps_restore(pid, addr)) // must parse before infection
+		return -1;
+
+	sprintf(maps, "cat /proc/%d/maps", pid);
+
+	state = compel_stop_task(pid);
+	if (state < 0) {
+		pr_err("Can't stop task\n");
+		return -1;
+	}
+
+	ctl = compel_prepare(pid);
+	if (!ctl) {
+		pr_err("Can't prepare for infection\n");
+		return -1;
+	}
+
+	ret = read_mm(pid, &mm);
+	if (ret < 0)
+	{
+		pr_err("Can't read mm.img\n");
+		return -1;
+	}
+	BUILD_BUG_ON(mm->n_vmas > TOTAL_VMAS);
+	pr_debug("Found %zd VMAs in image\n", mm->n_vmas);
+	pr_debug("\nCode: %lx-%lx\nData: %lx-%lx\nStack: %lx\nHeap(brk): %lx-%lx\nArg: %lx-%lx\nEnv: %lx-%lx\nExe file id: %u\n",
+		mm->mm_start_code, mm->mm_end_code, mm->mm_start_data, mm->mm_end_data,
+		mm->mm_start_stack, mm->mm_start_brk, mm->mm_brk, mm->mm_arg_start, mm->mm_arg_end,
+		mm->mm_env_start, mm->mm_env_end, mm->exe_file_id);
+
+	// Must mmap VMAs before infection
+	j = 0;
+	for (i = 0; i < mm->n_vmas; i++) {
+		unsigned long size;
+		int flag = 0;
+		VmaEntry *vma;
+		// bool has_fd = false;
+		bool skip = false;
+
+		for (; j < num_lines && mm->vmas[i]->end > (uint64_t)addr[j][0]; j++)
+			if (mm->vmas[i]->start >= (uint64_t)addr[j][0] && mm->vmas[i]->end <= (uint64_t)addr[j][1])
+			{
+				skip = true;
+				break;
+			}
+
+		if (skip)
+			continue;
+
+		vma = mm->vmas[i];
+		size = vma_entry_len(vma);
+
+		if (vma_entry_is(vma, VMA_AREA_AIORING))
+			flag |= MAP_ANONYMOUS;
+		else if (vma_entry_is(vma, VMA_FILE_PRIVATE))
+		{
+			if (vma->fd <= 0)
+			{
+				struct vma_area *vma_area;
+				struct reg_file_info *rfi;
+
+				vma_area = alloc_vma_area();
+				if (!vma_area)
+					return -1;
+
+				vma_area->e = vma;
+				if (collect_filemap(vma_area))
+				{
+					pr_err("Can't collect filemap\n");
+					return -1;
+				}
+
+				rfi = container_of(vma_area->vmfd, struct reg_file_info, d);
+
+				// Cannot use compel_syscall() to do open() since it needs pointer type arg. and the pointer must belong to dumpee's address space
+				// Reserve the space first and restore tha mapping later
+				pr_debug("Reserve for file private VMA %d -> %s, fdflags = %u\n", i, rfi->rfe->name, vma->fdflags);
+				BUILD_BUG_ON(strlen(rfi->rfe->name) > PATH_LEN - 1);
+				if (strncpy(path[i], rfi->rfe->name, PATH_LEN - 1) < 0)
+				{
+					pr_err("Can't copy path\n");
+					return -1;
+				}
+				flag |= MAP_ANON;
+				free(vma_area);
+			}
+		}
+
+		if ((compel_syscall(ctl, __NR_mmap, &ret, vma->start, size, vma->prot | PROT_WRITE, vma->flags | MAP_FIXED | flag, vma->fd, vma->pgoff) < 0) || (void*)ret == MAP_FAILED)
+		{
+			pr_err("mmap failed %d\n", i);
+			return -1;
+		}
+
+		pr_debug("%d %lx-%lx, ret = %lx (%ld), flags = %x, fd = %ld, off = %lu, status = %x\n", i, vma->start, vma->end, ret, ret, vma->flags, vma->fd, vma->pgoff, vma->status);
+
+		system(maps);
+	}
+	pr_info("Memory mappings restored\n");
+
+	ictx = compel_infect_ctx(ctl);
+	ictx->log_fd = STDERR_FILENO;
+
+	parasite_setup_c_header(ctl);
+
+	pr_info("Infecting\n");
+	if (compel_infect(ctl, num_threads, sizeof(struct mem_rst_args)))
+		pr_err("Can't infect victim");
+
+	arg = compel_parasite_args(ctl, struct mem_rst_args);
+
+	// mmap file private VMAs that have to open file fd
+	pr_info("Restore file private VMAs\n");
+
+	j = 0;
+	k = 0;
+	for (i = 0; i < mm->n_vmas; i++) {
+		bool skip = false;
+
+		if ((vma_entry_is(mm->vmas[i], VMA_FILE_PRIVATE) && mm->vmas[i]->fd <= 0))
+		{
+			for (; k < num_lines && mm->vmas[i]->end > (uint64_t)addr[k][0]; k++)
+				if (mm->vmas[i]->start >= (uint64_t)addr[k][0] && mm->vmas[i]->end <= (uint64_t)addr[k][1])
+				{
+					skip = true;
+					break;
+				}
+
+			if (!skip)
+			{
+				arg->vmas[j] = *mm->vmas[i];
+				if (strncpy(arg->path[j++], path[i], PATH_LEN - 1) < 0)
+				{
+					pr_err("Can't copy path\n");
+					return -1;
+				}
+			}
+		}
+
+		if (i == mm->n_vmas - 1)
+		{
+			for (; j < NUM_VMAS; j++)
+				arg->vmas[j].start = 0;
+		}
+
+		if (j == NUM_VMAS && compel_rpc_call_sync(PARASITE_CMD_RESTORE_FILE_PRIV_VMAS, ctl)) {
+			pr_err("Can't run parasite command PARASITE_CMD_RESTORE_FILE_PRIV_VMAS\n");
+			return -1;
+		}
+		j %= NUM_VMAS;
+	}
+	pr_info("File private VMAs restored\n");
+
+	system(maps);
+
+	// Read the content of pages
+	pr_info("Restore page content\n");
+	if (open_page_read(pid, &pr, PR_TASK) <= 0)
+		return -1;
+
+	i = 0;
+	k = 0;
+	vma = mm->vmas[i];
+	while (1) {
+		unsigned long nr_pages;
+
+		ret = pr.advance(&pr);
+		if (ret <= 0)
+			break;
+
+		va = (unsigned long)decode_pointer(pr.pe->vaddr);
+		nr_pages = pr.pe->nr_pages;
+
+		for (j = 0; j < nr_pages; j++) {
+			bool skip = false;
+
+			while (va >= vma->end) {
+				if (i == mm->n_vmas - 1)
+					return -1;
+				vma = mm->vmas[++i];
+			}
+			for (; k < num_lines && vma->end > (uint64_t)addr[k][0]; k++) // Skip the VMAs that didn't be unmapped. And they may not have PROT_WRITE
+				if (vma->start >= (uint64_t)addr[k][0] && vma->end <= (uint64_t)addr[k][1])
+				{
+					skip = true;
+					break;
+				}
+			if (skip)
+			{
+				pr.skip_pages(&pr, PAGE_SIZE);
+				continue;
+			}
+
+			if (va < vma->start)
+				return -1;
+
+			ret = pr.read_pages(&pr, va, 1, arg->page_content, 0);
+			if (ret < 0)
+				return -1;
+
+			arg->addr = decode_pointer(va);
+
+			pr_debug("Restore page %d of VMA %d at address %p\n", j, i, arg->addr);
+
+			if (compel_rpc_call_sync(PARASITE_CMD_RESTORE_PAGES, ctl)) {
+				pr_err("Can't run parasite command PARASITE_CMD_RESTORE_PAGES\n");
+				return -1;
+			}
+
+			va += PAGE_SIZE;
+			nr_restored++;
+		}
+	}
+	pr_info("nr_restored_pages: %d\n", nr_restored);
+
+	system(maps);
+
+	for (i = 0; i < mm->n_vmas; i++) {
+		arg->vmas[i % NUM_VMAS] = *mm->vmas[i];
+
+		if (i == mm->n_vmas - 1)
+		{
+			for (j = i % NUM_VMAS + 1; j < NUM_VMAS; j++)
+				arg->vmas[j].start = 0;
+		}
+
+		if ((i % NUM_VMAS == NUM_VMAS - 1 || i == mm->n_vmas - 1) && compel_rpc_call_sync(PARASITE_CMD_RESTORE_VMA_SETTINGS, ctl)) {
+			pr_err("Can't run parasite command PARASITE_CMD_RESTORE_VMA_SETTINGS\n");
+			return -1;
+		}
+	}
+
+	if (compel_cure(ctl)) {
+		pr_err("Can't cure victim\n");
+		return -1;
+	}
+
+	if (compel_resume_task(pid, state, COMPEL_TASK_ALIVE)) {
+		pr_err("Can't unseize task\n");
+		return -1;
+	}
+
+	system(maps);
+
+	kill(pid, SIGCONT);
+
+	if (rm_imgs(pid) < 0) {
+		pr_err("Can't remove images\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+int cr_mem_restore_tasks(pid_t pid)
+{
+	int ret = -1;
+
+	if (check_img_inventory(false) < 0)
+		return -1;
+
+	if (cr_plugin_init(CR_PLUGIN_STAGE__MEM_RESTORE))
+		return -1;
+
+	if (init_stats(RESTORE_STATS))
+		goto err;
+
+	timing_start(TIME_RESTORE);
+
+	if (cpu_init() < 0)
+		goto err;
+
+	if (prepare_memfd_inodes())
+		return -1;
+
+	if (prepare_files())
+		return -1;
+
+	ret = restore_memory(pid);
+err:
+	cr_plugin_fini(CR_PLUGIN_STAGE__RESTORE, ret);
+	return ret;
 }
 
 int cr_restore_tasks(void)

@@ -25,6 +25,7 @@ extern int cr_dump_tasks(pid_t pid);
 extern int cr_pre_dump_tasks(pid_t pid);
 extern int cr_mem_dump_tasks(pid_t pid);
 extern int cr_restore_tasks(void);
+extern int cr_mem_restore_tasks(pid_t pid);
 extern int convert_to_elf(char *elf_path, int fd_core);
 extern int cr_check(void);
 extern int check_caps(void);
