@@ -2290,7 +2290,9 @@ static int cr_mem_dump_finish(int status)
 	num_lines = count_maps_lines(root_item->pid->real);
 	if (num_lines < 0)
 		return -1;
-	mem_unmap(root_item->pid->real, num_lines);
+	ret = mem_unmap(root_item->pid->real, num_lines);
+	if (ret)
+		goto err;
 out:
 
 	free_pstree(root_item);
