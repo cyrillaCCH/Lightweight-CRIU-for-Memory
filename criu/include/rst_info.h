@@ -13,6 +13,7 @@
 #define NUM_VMAS 16
 #define PATH_LEN 128
 #define TOTAL_VMAS 256
+#define PAGE_SZ 4096
 
 struct task_entries {
 	int nr_threads, nr_tasks, nr_helpers;
@@ -104,7 +105,7 @@ struct mem_rst_args
 	union {
 		struct {
 			void *addr;
-			unsigned char page_content[PAGE_SIZE];
+			unsigned char page_content[PAGE_SZ];
 		};
 		struct {
 			VmaEntry vmas[NUM_VMAS];
