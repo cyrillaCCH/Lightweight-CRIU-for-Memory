@@ -2606,7 +2606,7 @@ static int restore_memory(pid_t pid)
 			if (!skip)
 			{
 				arg->vmas[j] = *mm->vmas[i];
-				if (strncpy(arg->path[j++], path[i], PATH_LEN - 1) < 0)
+				if (snprintf(arg->path[j++], PATH_LEN, "%s", path[i]) < 0)
 				{
 					pr_err("Can't copy path\n");
 					return -1;
