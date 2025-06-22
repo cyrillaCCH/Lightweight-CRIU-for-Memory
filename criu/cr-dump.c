@@ -2207,7 +2207,7 @@ static int mem_unmap(pid_t pid, int num_lines) {
 	ctl = compel_prepare(pid);
 	if (!ctl)
 		pr_err("Can't prepare for infection\n");
-	ret = -1;
+	ret = (addr[0][0] == NULL) ? 0 : -1;
 	for (int i = 0; i < num_lines && addr[i][0] != NULL; i++) {
 		if ((compel_syscall(ctl, __NR_munmap, &ret, (unsigned long)addr[i][0], addr[i][1]-addr[i][0], 0, 0, 0, 0) < 0) || ret < 0)
 			pr_err("Unmap error %d %p\n", i, addr[i][0]);
