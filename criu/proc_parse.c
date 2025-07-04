@@ -623,10 +623,10 @@ static int handle_vma(pid_t pid, struct vma_area *vma_area, const char *file_pat
 		} else if (S_ISCHR(st_buf->st_mode) && (st_buf->st_rdev == DEVZERO)) {
 			/* devzero mapping -- also makes sense */;
 			pr_debug("Found devzero mapping, OK\n");
-		} else if (handle_vma_plugin(vm_file_fd, st_buf)) {
+		} else if (opts.mode != CR_MEM_DUMP && handle_vma_plugin(vm_file_fd, st_buf)) {
 			pr_info("Found device file mapping, plugin is available\n");
 			vma_area->e->status |= VMA_EXT_PLUGIN;
-		} else {
+		} else if (opts.mode != CR_MEM_DUMP) {
 			/* non-regular mapping with no supporting plugin */
 			pr_err("Can't handle non-regular mapping on %d's map %" PRIx64 "\n", pid, vma_area->e->start);
 			goto err;
@@ -806,8 +806,9 @@ int parse_smaps(pid_t pid, struct vm_area_list *vma_area_list, dump_filemap_t du
 
 		if (!eof && !__is_vma_range_fmt(str)) {
 			if (!strncmp(str, "VmFlags: ", 9)) {
-				BUG_ON(!vma_area);
-				parse_vma_vmflags(&str[9], vma_area);
+				// BUG_ON(!vma_area);
+				if (vma_area) // Skip some strange VMAs on Android
+					parse_vma_vmflags(&str[9], vma_area);
 				continue;
 			} else
 				continue;
@@ -855,8 +856,12 @@ int parse_smaps(pid_t pid, struct vm_area_list *vma_area_list, dump_filemap_t du
 		}
 
 		pr_debug("Handling VMA with the following smaps entry: %s\n", str);
-		if (handle_vma(pid, vma_area, str + path_off, map_files_dir, &vfi, &prev_vfi, &vm_file_fd))
-			goto err;
+		if (handle_vma(pid, vma_area, str + path_off, map_files_dir, &vfi, &prev_vfi, &vm_file_fd)) {
+			xfree(vma_area);
+			vma_area = NULL;
+			continue;
+		}
+			// goto err;
 
 		if (vma_entry_is(vma_area->e, VMA_FILE_PRIVATE) || vma_entry_is(vma_area->e, VMA_FILE_SHARED)) {
 			if (dump_filemap && dump_filemap(vma_area, vm_file_fd))

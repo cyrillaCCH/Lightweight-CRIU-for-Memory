@@ -443,7 +443,7 @@ static int dump_filemap(struct vma_area *vma_area, int fd)
 
 	/* Flags will be set during restore in open_filmap() */
 
-	if (vma->status & VMA_AREA_MEMFD)
+	if (vma->status & VMA_AREA_MEMFD & vma_area_is(vma_area, VMA_FILE_PRIVATE))
 		ret = dump_one_memfd_cond(fd, &id, &p);
 	else
 		ret = dump_one_reg_file_cond(fd, &id, &p);
@@ -2059,7 +2059,7 @@ static int mem_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie
 
 	item->pid->ns[0].virt = misc.pid;
 
-	mdc.pre_dump = true;
+	mdc.pre_dump = false;
 	mdc.lazy = false;
 	mdc.stat = &pps_buf;
 	mdc.parent_ie = parent_ie;
@@ -2140,7 +2140,7 @@ static int parse_maps_dump(pid_t pid, char *path, char *libc_path, void *addr[][
     FILE *fp;
 	void *start, *end, *offset;
     unsigned int inode_num, dev_max, dev_min;
-    char r, w, x, s, file_name[PATH_MAX];
+    char r, w, x, s;
     char line[PATH_MAX + 128];
     int idx;
 
@@ -2154,8 +2154,21 @@ static int parse_maps_dump(pid_t pid, char *path, char *libc_path, void *addr[][
 	idx = 0;
     while (fgets(line, PATH_MAX + 128, fp)) {
 		int n;
-		char tmp[64];
-        n = sscanf(line, "%p-%p %c%c%c%c %p %u:%u %u %s\n", &start, &end, &r, &w, &x, &s, &offset, &dev_max, &dev_min, &inode_num, file_name);
+		int pathoff;
+#ifdef ANDROID
+		char *target[] = {
+							"[anon:dalvik-main space (region space)]",
+							"[anon:dalvik-free list large object space]",
+							"[anon:scudo",
+							"[anon:stack_and_tls",
+							"[anon:dalvik-classes.dex extracted in memory",
+							"[stack]"
+						};
+		int target_sz = sizeof(target) / sizeof(char*);
+		bool unmap = false;
+#endif
+
+        n = sscanf(line, "%p-%p %c%c%c%c %p %u:%u %u %n\n", &start, &end, &r, &w, &x, &s, &offset, &dev_max, &dev_min, &inode_num, &pathoff);
         if (n < 2) {
             pr_perror("Error parsing line: %s\n", line);
             fclose(fp);
@@ -2165,18 +2178,28 @@ static int parse_maps_dump(pid_t pid, char *path, char *libc_path, void *addr[][
 		if (s == 's') // shared memory
 			continue;
 
-		if (!strncmp(file_name, "/SYSV", 5)) // SYSV shared memory
+		if (x == 'x') // .text, unmap such section will fail generally
 			continue;
 
-		if ((!strcmp(file_name, libc_path) || !strcmp(file_name, path)) && r == 'r' && w == '-' && x == 'x' && s == 'p') // .text of libc and binary
+#ifdef ANDROID
+		if (strlen(line + pathoff) == 0)
+			unmap = true;
+		else
+			for (int i = 0; i < target_sz; i++)
+				if (!strncmp(line + pathoff, target[i], strlen(target[i]))) {
+					unmap = true;
+					break;
+				}
+
+		if (!unmap)
+			continue;
+#else
+		if (!strncmp(line + pathoff, "/SYSV", 5)) // SYSV shared memory
 			continue;
 
-		if ((n = sscanf(file_name, "[%s", tmp)) < 0) {
-			pr_perror("sscanf error\n");
-			return -1;
-		}
-		if (n == 1 && strcmp(tmp, "stack]") && strcmp(tmp, "heap]")) // special sections, such as [vdso] and [vvar] (except [stack] and [heap])
+		if (*(line + pathoff) == '[' && strncmp(line + pathoff + 1, "stack]", 6) && strncmp(line + pathoff + 1, "heap]", 5)) // special sections, such as [vdso] and [vvar] (except [stack] and [heap])
 			continue;
+#endif
 
         addr[idx][0] = start;
         addr[idx++][1] = end;
@@ -2209,10 +2232,12 @@ static int mem_unmap(pid_t pid, int num_lines) {
 		pr_err("Can't prepare for infection\n");
 	ret = (addr[0][0] == NULL) ? 0 : -1;
 	for (int i = 0; i < num_lines && addr[i][0] != NULL; i++) {
-		if ((compel_syscall(ctl, __NR_munmap, &ret, (unsigned long)addr[i][0], addr[i][1]-addr[i][0], 0, 0, 0, 0) < 0) || ret < 0)
+		if ((compel_syscall(ctl, __NR_munmap, &ret, (unsigned long)addr[i][0], addr[i][1]-addr[i][0], 0, 0, 0, 0) < 0) || ret < 0) {
 			pr_err("Unmap error %d %p\n", i, addr[i][0]);
-		if (ret < 0)
+			ret = -1;
 			break;
+		}
+		pr_info("%p-%p unmapped\n", addr[i][0], addr[i][1]);
 	}
 	if (compel_cure(ctl))
 		pr_err("Can't cure victim\n");
@@ -2226,8 +2251,6 @@ static int cr_mem_dump_finish(int status)
 	int ret;
 	int num_lines;
 	struct parasite_ctl *ctl = dmpi(root_item)->parasite_ctl;
-	struct page_pipe *mem_pp;
-	struct page_xfer xfer;
 
 	close_cr_imgset(&glob_imgset);
 
@@ -2248,41 +2271,13 @@ static int cr_mem_dump_finish(int status)
 
 	pstree_switch_state(root_item, TASK_STOPPED);
 
-	timing_stop(TIME_FROZEN);
-
 	if (status < 0) {
 		ret = status;
 		goto err;
 	}
 
-	pr_info("Dumping task's memory\n");
-
 	if (!ctl)
 		goto out;
-
-	pr_info("\tMem-dumping %d\n", vpid(root_item));
-	timing_start(TIME_MEMWRITE);
-	ret = open_page_xfer(&xfer, CR_FD_PAGEMAP, vpid(root_item));
-	if (ret < 0)
-		goto err;
-
-	mem_pp = dmpi(root_item)->mem_pp;
-
-	if (opts.pre_dump_mode == PRE_DUMP_READ) {
-		timing_stop(TIME_MEMWRITE);
-		ret = page_xfer_predump_pages(root_item->pid->real, &xfer, mem_pp);
-	} else {
-		ret = page_xfer_dump_pages(&xfer, mem_pp);
-	}
-
-	xfer.close(&xfer);
-
-	if (ret)
-		goto err;
-
-	timing_stop(TIME_MEMWRITE);
-
-	destroy_page_pipe(mem_pp);
 
 	if (compel_cure_local(ctl))
 		pr_err("Can't cure local: something happened with mapping?\n");

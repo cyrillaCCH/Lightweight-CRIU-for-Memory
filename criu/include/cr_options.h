@@ -99,6 +99,8 @@ enum FILE_VALIDATION_OPTIONS {
 /* This constant dictates that criu use fiemap to copy ghost file by default.*/
 #define FIEMAP_DEFAULT 1
 
+#define ANDROID
+
 struct irmap;
 
 struct irmap_path_opt {

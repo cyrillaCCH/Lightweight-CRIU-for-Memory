@@ -2463,7 +2463,6 @@ static int restore_memory(pid_t pid)
 	int num_threads = count_threads(pid);
 	char maps[32];
 	void *addr[num_lines][2];
-	char path[TOTAL_VMAS][PATH_LEN];
 	struct parasite_ctl *ctl;
 	struct infect_ctx *ictx;
 	long ret;
@@ -2493,12 +2492,11 @@ static int restore_memory(pid_t pid)
 	}
 
 	ret = read_mm(pid, &mm);
-	if (ret < 0)
-	{
+	if (ret < 0) {
 		pr_err("Can't read mm.img\n");
 		return -1;
 	}
-	BUILD_BUG_ON(mm->n_vmas > TOTAL_VMAS);
+
 	pr_debug("Found %zd VMAs in image\n", mm->n_vmas);
 	pr_debug("\nCode: %lx-%lx\nData: %lx-%lx\nStack: %lx\nHeap(brk): %lx-%lx\nArg: %lx-%lx\nEnv: %lx-%lx\nExe file id: %u\n",
 		mm->mm_start_code, mm->mm_end_code, mm->mm_start_data, mm->mm_end_data,
@@ -2511,12 +2509,10 @@ static int restore_memory(pid_t pid)
 		unsigned long size;
 		int flag = 0;
 		VmaEntry *vma;
-		// bool has_fd = false;
 		bool skip = false;
 
 		for (; j < num_lines && mm->vmas[i]->end > (uint64_t)addr[j][0]; j++)
-			if (mm->vmas[i]->start >= (uint64_t)addr[j][0] && mm->vmas[i]->end <= (uint64_t)addr[j][1])
-			{
+			if (mm->vmas[i]->start >= (uint64_t)addr[j][0] && mm->vmas[i]->end <= (uint64_t)addr[j][1]) {
 				skip = true;
 				break;
 			}
@@ -2529,49 +2525,23 @@ static int restore_memory(pid_t pid)
 
 		if (vma_entry_is(vma, VMA_AREA_AIORING))
 			flag |= MAP_ANONYMOUS;
-		else if (vma_entry_is(vma, VMA_FILE_PRIVATE))
-		{
-			if (vma->fd <= 0)
-			{
-				struct vma_area *vma_area;
-				struct reg_file_info *rfi;
-
-				vma_area = alloc_vma_area();
-				if (!vma_area)
-					return -1;
-
-				vma_area->e = vma;
-				if (collect_filemap(vma_area))
-				{
-					pr_err("Can't collect filemap\n");
-					return -1;
-				}
-
-				rfi = container_of(vma_area->vmfd, struct reg_file_info, d);
-
+		else if (vma_entry_is(vma, VMA_FILE_PRIVATE)) {
+			if (vma->fd <= 0) {
 				// Cannot use compel_syscall() to do open() since it needs pointer type arg. and the pointer must belong to dumpee's address space
 				// Reserve the space first and restore tha mapping later
-				pr_debug("Reserve for file private VMA %d -> %s, fdflags = %u\n", i, rfi->rfe->name, vma->fdflags);
-				BUILD_BUG_ON(strlen(rfi->rfe->name) > PATH_LEN - 1);
-				if (strncpy(path[i], rfi->rfe->name, PATH_LEN - 1) < 0)
-				{
-					pr_err("Can't copy path\n");
-					return -1;
-				}
+				pr_debug("Reserve for file private VMA %d, fdflags = %u\n", i, vma->fdflags);
 				flag |= MAP_ANON;
-				free(vma_area);
 			}
 		}
 
-		if ((compel_syscall(ctl, __NR_mmap, &ret, vma->start, size, vma->prot | PROT_WRITE, vma->flags | MAP_FIXED | flag, vma->fd, vma->pgoff) < 0) || (void*)ret == MAP_FAILED)
-		{
+		if ((compel_syscall(ctl, __NR_mmap, &ret, vma->start, size, vma->prot | PROT_WRITE, vma->flags | MAP_FIXED | flag, vma->fd, vma->pgoff) < 0) || (void*)ret == MAP_FAILED) {
 			pr_err("mmap failed %d\n", i);
 			return -1;
 		}
 
 		pr_debug("%d %lx-%lx, ret = %lx (%ld), flags = %x, fd = %ld, off = %lu, status = %x\n", i, vma->start, vma->end, ret, ret, vma->flags, vma->fd, vma->pgoff, vma->status);
 
-		system(maps);
+		// system(maps);
 	}
 	pr_info("Memory mappings restored\n");
 
@@ -2594,28 +2564,42 @@ static int restore_memory(pid_t pid)
 	for (i = 0; i < mm->n_vmas; i++) {
 		bool skip = false;
 
-		if ((vma_entry_is(mm->vmas[i], VMA_FILE_PRIVATE) && mm->vmas[i]->fd <= 0))
-		{
+		if ((vma_entry_is(mm->vmas[i], VMA_FILE_PRIVATE) && mm->vmas[i]->fd <= 0)) {
 			for (; k < num_lines && mm->vmas[i]->end > (uint64_t)addr[k][0]; k++)
-				if (mm->vmas[i]->start >= (uint64_t)addr[k][0] && mm->vmas[i]->end <= (uint64_t)addr[k][1])
-				{
+				if (mm->vmas[i]->start >= (uint64_t)addr[k][0] && mm->vmas[i]->end <= (uint64_t)addr[k][1]) {
 					skip = true;
 					break;
 				}
 
-			if (!skip)
-			{
+			if (!skip) {
+				struct vma_area *vma_area;
+				struct reg_file_info *rfi;
+
 				arg->vmas[j] = *mm->vmas[i];
-				if (snprintf(arg->path[j++], PATH_LEN, "%s", path[i]) < 0)
-				{
+
+				vma_area = alloc_vma_area();
+				if (!vma_area)
+					return -1;
+
+				vma_area->e = mm->vmas[i];
+				if (collect_filemap(vma_area)) {
+					pr_err("Can't collect filemap\n");
+					return -1;
+				}
+
+				rfi = container_of(vma_area->vmfd, struct reg_file_info, d);
+
+				BUILD_BUG_ON(strlen(rfi->rfe->name) > PATH_LEN - 1);
+				if (snprintf(arg->path[j++], PATH_LEN, "%s", rfi->rfe->name) < 0) {
 					pr_err("Can't copy path\n");
 					return -1;
 				}
+
+				free(vma_area);
 			}
 		}
 
-		if (i == mm->n_vmas - 1)
-		{
+		if (i == mm->n_vmas - 1) {
 			for (; j < NUM_VMAS; j++)
 				arg->vmas[j].start = 0;
 		}
@@ -2628,7 +2612,7 @@ static int restore_memory(pid_t pid)
 	}
 	pr_info("File private VMAs restored\n");
 
-	system(maps);
+	// system(maps);
 
 	// Read the content of pages
 	pr_info("Restore page content\n");
@@ -2657,13 +2641,11 @@ static int restore_memory(pid_t pid)
 				vma = mm->vmas[++i];
 			}
 			for (; k < num_lines && vma->end > (uint64_t)addr[k][0]; k++) // Skip the VMAs that didn't be unmapped. And they may not have PROT_WRITE
-				if (vma->start >= (uint64_t)addr[k][0] && vma->end <= (uint64_t)addr[k][1])
-				{
+				if (vma->start >= (uint64_t)addr[k][0] && vma->end <= (uint64_t)addr[k][1]) {
 					skip = true;
 					break;
 				}
-			if (skip)
-			{
+			if (skip) {
 				pr.skip_pages(&pr, PAGE_SIZE);
 				continue;
 			}
@@ -2690,21 +2672,32 @@ static int restore_memory(pid_t pid)
 	}
 	pr_info("nr_restored_pages: %d\n", nr_restored);
 
-	system(maps);
+	// system(maps);
 
+	j = 0;
+	k = 0;
 	for (i = 0; i < mm->n_vmas; i++) {
-		arg->vmas[i % NUM_VMAS] = *mm->vmas[i];
+		bool skip = false;
 
-		if (i == mm->n_vmas - 1)
-		{
-			for (j = i % NUM_VMAS + 1; j < NUM_VMAS; j++)
+		for (; k < num_lines && mm->vmas[i]->end > (uint64_t)addr[k][0]; k++)
+			if (mm->vmas[i]->start >= (uint64_t)addr[k][0] && mm->vmas[i]->end <= (uint64_t)addr[k][1]) {
+				skip = true;
+				break;
+			}
+
+		if (!skip)
+			arg->vmas[j] = *mm->vmas[i];
+
+		if (i == mm->n_vmas - 1) {
+			for (; j < NUM_VMAS; j++)
 				arg->vmas[j].start = 0;
 		}
 
-		if ((i % NUM_VMAS == NUM_VMAS - 1 || i == mm->n_vmas - 1) && compel_rpc_call_sync(PARASITE_CMD_RESTORE_VMA_SETTINGS, ctl)) {
+		if (j == NUM_VMAS && compel_rpc_call_sync(PARASITE_CMD_RESTORE_VMA_SETTINGS, ctl)) {
 			pr_err("Can't run parasite command PARASITE_CMD_RESTORE_VMA_SETTINGS\n");
 			return -1;
 		}
+		j %= NUM_VMAS;
 	}
 
 	if (compel_cure(ctl)) {
@@ -2717,7 +2710,7 @@ static int restore_memory(pid_t pid)
 		return -1;
 	}
 
-	system(maps);
+	// system(maps);
 
 	kill(pid, SIGCONT);
 

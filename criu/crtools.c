@@ -397,6 +397,8 @@ usage:
 	       "  criu service [<options>]\n"
 	       "  criu dedup\n"
 	       "  criu lazy-pages -D DIR [<options>]\n"
+	       "  criu mem-dump -t PID [<options>]\n"
+	       "  criu mem-restore -t PID [<options>]\n"
 	       "\n"
 	       "Commands:\n"
 	       "  dump           checkpoint a process/tree identified by pid\n"
@@ -407,7 +409,10 @@ usage:
 	       "  service        launch service\n"
 	       "  dedup          remove duplicates in memory dump\n"
 	       "  cpuinfo dump   writes cpu information into image file\n"
-	       "  cpuinfo check  validates cpu information read from image file\n");
+	       "  cpuinfo check  validates cpu information read from image file\n"
+	       "  mem-dump	 	 release the memory of a process as possible\n"
+		   "  mem-restore	 restore the memory dumped by mem-dump, and continue the execution"
+	       "  cpuinfo check  restore released memory of a process\n");
 
 	if (usage_error) {
 		pr_msg("\nTry -h|--help for more info\n");

@@ -12,7 +12,6 @@
 
 #define NUM_VMAS 16
 #define PATH_LEN 128
-#define TOTAL_VMAS 256
 #define PAGE_SZ 4096
 
 struct task_entries {

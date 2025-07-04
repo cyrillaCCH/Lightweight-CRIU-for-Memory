@@ -846,28 +846,24 @@ static int parasite_restore_file_priv_vmas(struct mem_rst_args *args)
 	int i, fd;
 	VmaEntry *vma;
 
-	for (i = 0; i < NUM_VMAS; i++)
-	{
+	for (i = 0; i < NUM_VMAS; i++) {
 		if (args->vmas[i].start == 0)
 			continue;
 
 		vma = &args->vmas[i];
 
 		fd = sys_open(args->path[i], vma->fdflags, 0);
-		if (fd < 0)
-		{
+		if (fd < 0) {
 			pr_err("Can't open file %s for mmap\n", args->path[i]);
 			return -1;
 		}
 
-		if (sys_mmap((void*)vma->start, vma->end - vma->start, vma->prot | PROT_WRITE, vma->flags | MAP_FILE | MAP_FIXED, fd, vma->pgoff) < 0)
-		{
+		if (sys_mmap((void*)vma->start, vma->end - vma->start, vma->prot | PROT_WRITE, vma->flags | MAP_FILE | MAP_FIXED, fd, vma->pgoff) < 0) {
 			pr_err("Can't mmap VMA at %lx-%lx -> %s\n", args->vmas[i].start, args->vmas[i].end, args->path[i]);
 			return -1;
 		}
 
-		if (sys_close(fd) < 0)
-		{
+		if (sys_close(fd) < 0) {
 			pr_err("Can't close file %s\n", args->path[i]);
 			return -1;
 		}
@@ -881,8 +877,7 @@ static int parasite_restore_memory(struct mem_rst_args *args)
 	int i;
 	unsigned char *dst = (unsigned char*)args->addr;
 
-	for (i = 0; i < PAGE_SIZE; i++)
-	{
+	for (i = 0; i < PAGE_SIZE; i++) {
 		dst[i] = args->page_content[i];
 	}
 
@@ -909,10 +904,8 @@ static int parasite_restore_vma_settings(struct mem_rst_args *args)
 		if ((vma->prot & PROT_WRITE) || (vma->status & VMA_NO_PROT_WRITE))
 			continue;
 
-
 		ret = sys_mprotect(decode_pointer(vma->start), vma_entry_len(vma), vma->prot);
-		if (ret < 0)
-		{
+		if (ret < 0) {
 			pr_err("mprotect failed %d\n", i);
 			return -1;
 		}
@@ -935,8 +928,7 @@ static int parasite_restore_vma_settings(struct mem_rst_args *args)
 		for (m = 0; m < sizeof(vma->madv) * 8; m++) {
 			if (vma->madv & (1ul << m)) {
 				ret = sys_madvise(vma->start, vma_entry_len(vma), m);
-				if (ret < 0)
-				{
+				if (ret < 0) {
 					pr_err("madvise(%lu, %lu, %lu) failed with %ld\n",
 					       vma->start, vma_entry_len(vma), m, ret);
 					return -1;
