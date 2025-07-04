@@ -102,6 +102,8 @@ static bool __is_vma_range_fmt(char *line)
 #undef ____is_vma_addr_char
 }
 
+extern bool should_mem_dump_vma(char *vma_name, char r, char w, char x, char s);
+
 bool is_vma_range_fmt(char *line)
 {
 	return __is_vma_range_fmt(line);
@@ -777,6 +779,7 @@ int parse_smaps(pid_t pid, struct vm_area_list *vma_area_list, dump_filemap_t du
 	int ret = -1, vm_file_fd = -1;
 	struct vma_file_info vfi;
 	struct vma_file_info prev_vfi = {};
+	bool first_exe_vma_found = false;
 
 	DIR *map_files_dir = NULL;
 	struct bfd f;
@@ -856,12 +859,22 @@ int parse_smaps(pid_t pid, struct vm_area_list *vma_area_list, dump_filemap_t du
 		}
 
 		pr_debug("Handling VMA with the following smaps entry: %s\n", str);
-		if (handle_vma(pid, vma_area, str + path_off, map_files_dir, &vfi, &prev_vfi, &vm_file_fd)) {
-			xfree(vma_area);
-			vma_area = NULL;
-			continue;
+		if (opts.mode == CR_MEM_DUMP) {
+			if ((first_exe_vma_found && !should_mem_dump_vma(str + path_off, r, w, x, s)) // parasite needs at least one executable VMA to infect
+				|| handle_vma(pid, vma_area, str + path_off, map_files_dir, &vfi, &prev_vfi, &vm_file_fd)) {
+				xfree(vma_area);
+				vma_area = NULL;
+				continue;
+			}
+		} else {
+			if (handle_vma(pid, vma_area, str + path_off, map_files_dir, &vfi, &prev_vfi, &vm_file_fd))
+				goto err;
 		}
-			// goto err;
+
+		if ((vma_area->e->prot & PROT_EXEC)
+			&& vma_area->e->start < kdat.task_size
+			&& vma_area_len(vma_area) >= PARASITE_START_AREA_MIN)
+			first_exe_vma_found = true;
 
 		if (vma_entry_is(vma_area->e, VMA_FILE_PRIVATE) || vma_entry_is(vma_area->e, VMA_FILE_SHARED)) {
 			if (dump_filemap && dump_filemap(vma_area, vm_file_fd))

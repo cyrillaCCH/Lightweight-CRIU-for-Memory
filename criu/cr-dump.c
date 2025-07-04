@@ -2135,6 +2135,46 @@ static int get_path(pid_t pid, char *path, char *libc_path) {
     return 0;
 }
 
+bool should_mem_dump_vma(char *vma_name, char r, char w, char x, char s) {
+#ifdef ANDROID
+	char *target[] = {
+						"[anon:dalvik-main space (region space)]",
+						"[anon:dalvik-free list large object space]",
+						"[anon:scudo",
+						"[anon:stack_and_tls",
+						"[anon:dalvik-classes.dex extracted in memory",
+						"[stack]"
+					};
+	int target_sz = sizeof(target) / sizeof(char*);
+#endif
+
+	if (s == 's') // shared memory
+		return false;
+
+	if (x == 'x') // .text, unmap such section will fail generally
+		return false;
+
+#ifdef ANDROID
+	if (strlen(vma_name) == 0)
+		return true;
+
+	for (int i = 0; i < target_sz; i++)
+		if (!strncmp(vma_name, target[i], strlen(target[i])))
+			return true;
+
+	return false;
+#else
+	if (!strncmp(vma_name, "/SYSV", 5)) // SYSV shared memory
+		return false;
+
+	if (vma_name[0] == '[' && strncmp(vma_name + 1, "stack]", strlen("stack]"))
+		&& strncmp(vma_name + 1, "heap]", strlen("heap]"))) // special sections, such as [vdso] and [vvar] (except [stack] and [heap])
+		return false;
+
+	return true;
+#endif
+}
+
 static int parse_maps_dump(pid_t pid, char *path, char *libc_path, void *addr[][2]) {
 	char maps[PATH_MAX];
     FILE *fp;
@@ -2155,18 +2195,6 @@ static int parse_maps_dump(pid_t pid, char *path, char *libc_path, void *addr[][
     while (fgets(line, PATH_MAX + 128, fp)) {
 		int n;
 		int pathoff;
-#ifdef ANDROID
-		char *target[] = {
-							"[anon:dalvik-main space (region space)]",
-							"[anon:dalvik-free list large object space]",
-							"[anon:scudo",
-							"[anon:stack_and_tls",
-							"[anon:dalvik-classes.dex extracted in memory",
-							"[stack]"
-						};
-		int target_sz = sizeof(target) / sizeof(char*);
-		bool unmap = false;
-#endif
 
         n = sscanf(line, "%p-%p %c%c%c%c %p %u:%u %u %n\n", &start, &end, &r, &w, &x, &s, &offset, &dev_max, &dev_min, &inode_num, &pathoff);
         if (n < 2) {
@@ -2175,31 +2203,8 @@ static int parse_maps_dump(pid_t pid, char *path, char *libc_path, void *addr[][
             return -1;
         }
 
-		if (s == 's') // shared memory
+		if (!should_mem_dump_vma(line + pathoff, r, w, x, s))
 			continue;
-
-		if (x == 'x') // .text, unmap such section will fail generally
-			continue;
-
-#ifdef ANDROID
-		if (strlen(line + pathoff) == 0)
-			unmap = true;
-		else
-			for (int i = 0; i < target_sz; i++)
-				if (!strncmp(line + pathoff, target[i], strlen(target[i]))) {
-					unmap = true;
-					break;
-				}
-
-		if (!unmap)
-			continue;
-#else
-		if (!strncmp(line + pathoff, "/SYSV", 5)) // SYSV shared memory
-			continue;
-
-		if (*(line + pathoff) == '[' && strncmp(line + pathoff + 1, "stack]", 6) && strncmp(line + pathoff + 1, "heap]", 5)) // special sections, such as [vdso] and [vvar] (except [stack] and [heap])
-			continue;
-#endif
 
         addr[idx][0] = start;
         addr[idx++][1] = end;
