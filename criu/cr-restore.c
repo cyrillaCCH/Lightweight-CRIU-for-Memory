@@ -2456,58 +2456,11 @@ static int read_mm(pid_t pid, MmEntry **mm)
 	return 0;
 }
 
-static int restore_memory(pid_t pid)
-{
-	int state;
-	int i, j, k;
-	int num_lines = count_maps_lines(pid);
-	int num_threads = count_threads(pid);
-	char maps[32];
-	void *addr[num_lines][2];
-	struct parasite_ctl *ctl;
-	struct infect_ctx *ictx;
+static int mmap_all_vmas_back(struct parasite_ctl *ctl, MmEntry *mm, int num_lines, void *addr[][2]) {
+	int i = 0, j = 0;
 	long ret;
-	struct page_read pr;
-	VmaEntry *vma;
-	unsigned long va;
-	unsigned int nr_restored = 0;
-	MmEntry *mm;
-	struct mem_rst_args *arg;
-	int page_pipe[2];
 
-	memset(addr, 0, sizeof(void*) * num_lines * 2);
-	if (parse_maps_restore(pid, addr)) // must parse before infection
-		return -1;
-
-	sprintf(maps, "cat /proc/%d/maps", pid);
-
-	state = compel_stop_task(pid);
-	if (state < 0) {
-		pr_err("Can't stop task\n");
-		return -1;
-	}
-
-	ctl = compel_prepare(pid);
-	if (!ctl) {
-		pr_err("Can't prepare for infection\n");
-		return -1;
-	}
-
-	ret = read_mm(pid, &mm);
-	if (ret < 0) {
-		pr_err("Can't read mm.img\n");
-		return -1;
-	}
-
-	pr_debug("Found %zd VMAs in image\n", mm->n_vmas);
-	pr_debug("\nCode: %lx-%lx\nData: %lx-%lx\nStack: %lx\nHeap(brk): %lx-%lx\nArg: %lx-%lx\nEnv: %lx-%lx\nExe file id: %u\n",
-		mm->mm_start_code, mm->mm_end_code, mm->mm_start_data, mm->mm_end_data,
-		mm->mm_start_stack, mm->mm_start_brk, mm->mm_brk, mm->mm_arg_start, mm->mm_arg_end,
-		mm->mm_env_start, mm->mm_env_end, mm->exe_file_id);
-
-	// Must mmap VMAs before infection
-	j = 0;
-	for (i = 0; i < mm->n_vmas; i++) {
+	for (; i < mm->n_vmas; i++) {
 		unsigned long size;
 		int flag = 0;
 		VmaEntry *vma;
@@ -2542,28 +2495,16 @@ static int restore_memory(pid_t pid)
 		}
 
 		pr_debug("%d %lx-%lx, ret = %lx (%ld), flags = %x, fd = %ld, off = %lu, status = %x\n", i, vma->start, vma->end, ret, ret, vma->flags, vma->fd, vma->pgoff, vma->status);
-
-		// system(maps);
 	}
+
 	pr_info("Memory mappings restored\n");
+	return 0;
+}
 
-	ictx = compel_infect_ctx(ctl);
-	ictx->log_fd = STDERR_FILENO;
+static int restore_file_vmas(struct parasite_ctl *ctl, struct mem_rst_args *arg, MmEntry *mm, int num_lines, void *addr[][2]) {
+	int i = 0, j = 0, k = 0;
 
-	parasite_setup_c_header(ctl);
-
-	pr_info("Infecting\n");
-	if (compel_infect(ctl, num_threads, sizeof(struct mem_rst_args)))
-		pr_err("Can't infect victim");
-
-	arg = compel_parasite_args(ctl, struct mem_rst_args);
-
-	// mmap file private VMAs that have to open file fd
-	pr_info("Restore file private VMAs\n");
-
-	j = 0;
-	k = 0;
-	for (i = 0; i < mm->n_vmas; i++) {
+	for (; i < mm->n_vmas; i++) {
 		bool skip = false;
 
 		if ((vma_entry_is(mm->vmas[i], VMA_FILE_PRIVATE) && mm->vmas[i]->fd <= 0)) {
@@ -2612,12 +2553,20 @@ static int restore_memory(pid_t pid)
 		}
 		j %= NUM_VMAS;
 	}
+
 	pr_info("File private VMAs restored\n");
+	return 0;
+}
 
-	// system(maps);
+static int restore_page_content(struct parasite_ctl *ctl, struct mem_rst_args *arg, MmEntry *mm, int num_lines, void *addr[][2], pid_t pid) {
+	int i, j, k;
+	long ret;
+	struct page_read pr;
+	int page_pipe[2];
+	VmaEntry *vma;
+	unsigned long va;
+	unsigned int nr_restored = 0;
 
-	// Read the content of pages
-	pr_info("Restore page content\n");
 	if (open_page_read(pid, &pr, PR_TASK) <= 0)
 		return -1;
 
@@ -2689,13 +2638,15 @@ static int restore_memory(pid_t pid)
 			nr_restored++;
 		}
 	}
+
 	pr_info("nr_restored_pages: %d\n", nr_restored);
+	return 0;
+}
 
-	// system(maps);
+static int restore_vma_settings(struct parasite_ctl *ctl, struct mem_rst_args *arg, MmEntry *mm, int num_lines, void *addr[][2]) {
+	int i = 0, j = 0, k = 0;
 
-	j = 0;
-	k = 0;
-	for (i = 0; i < mm->n_vmas; i++) {
+	for (; i < mm->n_vmas; i++) {
 		bool skip = false;
 
 		for (; k < num_lines && mm->vmas[i]->end > (uint64_t)addr[k][0]; k++)
@@ -2719,6 +2670,78 @@ static int restore_memory(pid_t pid)
 		j %= NUM_VMAS;
 	}
 
+	pr_info("VMAs setting restored\n");
+	return 0;
+}
+
+static int restore_memory(pid_t pid)
+{
+	int state;
+	int num_lines = count_maps_lines(pid);
+	int num_threads = count_threads(pid);
+	void *addr[num_lines][2];
+	struct parasite_ctl *ctl;
+	struct infect_ctx *ictx;
+	long ret;
+	MmEntry *mm;
+	struct mem_rst_args *arg;
+
+	memset(addr, 0, sizeof(void*) * num_lines * 2);
+	if (parse_maps_restore(pid, addr)) // must parse before infection
+		return -1;
+
+	state = compel_stop_task(pid);
+	if (state < 0) {
+		pr_err("Can't stop task\n");
+		return -1;
+	}
+
+	ctl = compel_prepare(pid);
+	if (!ctl) {
+		pr_err("Can't prepare for infection\n");
+		return -1;
+	}
+
+	ret = read_mm(pid, &mm);
+	if (ret < 0) {
+		pr_err("Can't read mm.img\n");
+		return -1;
+	}
+
+	pr_debug("Found %zd VMAs in image\n", mm->n_vmas);
+	pr_debug("\nCode: %lx-%lx\nData: %lx-%lx\nStack: %lx\nHeap(brk): %lx-%lx\nArg: %lx-%lx\nEnv: %lx-%lx\nExe file id: %u\n",
+		mm->mm_start_code, mm->mm_end_code, mm->mm_start_data, mm->mm_end_data,
+		mm->mm_start_stack, mm->mm_start_brk, mm->mm_brk, mm->mm_arg_start, mm->mm_arg_end,
+		mm->mm_env_start, mm->mm_env_end, mm->exe_file_id);
+
+	// Must mmap VMAs before infection
+	if (mmap_all_vmas_back(ctl, mm, num_lines, addr) < 0)
+		return -1;
+
+	ictx = compel_infect_ctx(ctl);
+	ictx->log_fd = STDERR_FILENO;
+
+	parasite_setup_c_header(ctl);
+
+	pr_info("Infecting\n");
+	if (compel_infect(ctl, num_threads, sizeof(struct mem_rst_args)))
+		pr_err("Can't infect victim");
+
+	arg = compel_parasite_args(ctl, struct mem_rst_args);
+
+	// mmap file private VMAs that have to open file fd
+	pr_info("File private VMAs restored\n");
+	if (restore_file_vmas(ctl, arg, mm, num_lines, addr) < 0)
+		return -1;
+
+	// Read the content of pages
+	pr_info("Restore page content\n");
+	if (restore_page_content(ctl, arg, mm, num_lines, addr, pid) < 0)
+		return -1;
+
+	if (restore_vma_settings(ctl, arg, mm, num_lines, addr) < 0)
+		return -1;
+
 	if (compel_cure(ctl)) {
 		pr_err("Can't cure victim\n");
 		return -1;
@@ -2728,8 +2751,6 @@ static int restore_memory(pid_t pid)
 		pr_err("Can't unseize task\n");
 		return -1;
 	}
-
-	// system(maps);
 
 	kill(pid, SIGCONT);
 
