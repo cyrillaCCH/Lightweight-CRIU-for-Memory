@@ -2142,6 +2142,7 @@ bool should_mem_dump_vma(char *vma_name, char r, char w, char x, char s) {
 						"[anon:dalvik-free list large object space]",
 						"[anon:scudo",
 						"[anon:stack_and_tls",
+						"[anon:.bss]",
 						"[anon:dalvik-classes.dex extracted in memory",
 						"[stack]"
 					};
