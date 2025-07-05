@@ -104,7 +104,7 @@ struct mem_rst_args
 	union {
 		struct {
 			void *addr;
-			unsigned char page_content[PAGE_SZ];
+			int pipe_fd;
 		};
 		struct {
 			VmaEntry vmas[NUM_VMAS];

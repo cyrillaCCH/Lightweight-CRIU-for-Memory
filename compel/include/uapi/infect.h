@@ -52,7 +52,7 @@ extern int __must_check compel_cure_remote(struct parasite_ctl *ctl);
 extern int __must_check compel_cure_local(struct parasite_ctl *ctl);
 extern int __must_check compel_cure(struct parasite_ctl *ctl);
 
-#define PARASITE_ARG_SIZE_MIN (1 << 13)
+#define PARASITE_ARG_SIZE_MIN (1 << 12)
 
 #define compel_parasite_args(ctl, type)                             \
 	({                                                          \

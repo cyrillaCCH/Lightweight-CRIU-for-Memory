@@ -89,6 +89,7 @@
 #include "files-reg.h"
 #include <compel/plugins/std/syscall-codes.h>
 #include "compel/include/asm/syscall.h"
+#include "compel/infect-util.h"
 
 #include "linux/mount.h"
 
@@ -2472,6 +2473,9 @@ static int restore_memory(pid_t pid)
 	unsigned int nr_restored = 0;
 	MmEntry *mm;
 	struct mem_rst_args *arg;
+	int page_pipe[2];
+	char page_buf[PAGE_SIZE];
+	struct iovec page_iov = { page_buf, sizeof(page_buf) };
 
 	memset(addr, 0, sizeof(void*) * num_lines * 2);
 	if (parse_maps_restore(pid, addr)) // must parse before infection
@@ -2619,6 +2623,23 @@ static int restore_memory(pid_t pid)
 	if (open_page_read(pid, &pr, PR_TASK) <= 0)
 		return -1;
 
+	if (compel_rpc_call(PARASITE_CMD_RECV_FD, ctl)) {
+		pr_err("Can't run parasite command PARASITE_CMD_RECV_FD\n");
+		return -1;
+	}
+
+	if (pipe(page_pipe) || compel_util_send_fd(ctl, page_pipe[0])) {
+		pr_err("Cannot create pipe between CRIU and dumpee\n");
+		return -1;
+	}
+
+	if (compel_rpc_sync(PARASITE_CMD_RECV_FD, ctl)) {
+		pr_err("Can't run parasite command PARASITE_CMD_RECV_FD\n");
+		return -1;
+	}
+
+	close(page_pipe[0]);
+
 	i = 0;
 	k = 0;
 	vma = mm->vmas[i];
@@ -2653,9 +2674,12 @@ static int restore_memory(pid_t pid)
 			if (va < vma->start)
 				return -1;
 
-			ret = pr.read_pages(&pr, va, 1, arg->page_content, 0);
+			ret = pr.read_pages(&pr, va, 1, page_buf, 0);
+
 			if (ret < 0)
 				return -1;
+
+			vmsplice(page_pipe[1], &page_iov, 1, 0);
 
 			arg->addr = decode_pointer(va);
 

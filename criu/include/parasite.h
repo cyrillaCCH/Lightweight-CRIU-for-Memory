@@ -41,6 +41,7 @@ enum {
 	PARASITE_CMD_RESTORE_FILE_PRIV_VMAS,
 	PARASITE_CMD_RESTORE_PAGES,
 	PARASITE_CMD_RESTORE_VMA_SETTINGS,
+	PARASITE_CMD_RECV_FD,
 
 	PARASITE_CMD_MAX,
 };
@@ -249,7 +250,7 @@ struct parasite_dump_cgroup_args {
 	 *
 	 * The string is null terminated.
 	 */
-	char contents[(1 << 13) - 32];
+	char contents[(1 << 12) - 32];
 	/*
 	 * Contains the path to thread cgroup procfs.
 	 * "self/task/<tid>/cgroup"

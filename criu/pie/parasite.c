@@ -874,12 +874,19 @@ static int parasite_restore_file_priv_vmas(struct mem_rst_args *args)
 
 static int parasite_restore_memory(struct mem_rst_args *args)
 {
-	int i;
-	unsigned char *dst = (unsigned char*)args->addr;
+	struct iovec iov = { args->addr, PAGE_SIZE };
+	sys_vmsplice(args->pipe_fd, &iov, 1, 0);
 
-	for (i = 0; i < PAGE_SIZE; i++) {
-		dst[i] = args->page_content[i];
-	}
+	return 0;
+}
+
+static int parasite_recv_fd(struct mem_rst_args *args) {
+	int tsock;
+
+	tsock = parasite_get_rpc_sock();
+	args->pipe_fd = recv_fd(tsock);
+	if (args->pipe_fd < 0)
+		return -1;
 
 	return 0;
 }
@@ -1001,6 +1008,9 @@ int parasite_daemon_cmd(int cmd, void *args)
 		break;
 	case PARASITE_CMD_RESTORE_VMA_SETTINGS:
 		ret = parasite_restore_vma_settings(args);
+		break;
+	case PARASITE_CMD_RECV_FD:
+		ret = parasite_recv_fd(args);
 		break;
 	default:
 		pr_err("Unknown command in parasite daemon thread leader: %d\n", cmd);
