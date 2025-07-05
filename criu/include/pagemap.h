@@ -108,6 +108,8 @@ struct task_restore_args;
 int pagemap_enqueue_iovec(struct page_read *pr, void *buf, unsigned long len, struct list_head *to);
 int pagemap_render_iovec(struct list_head *from, struct task_restore_args *ta);
 
+int read_local_page_to_pipe(struct page_read *pr, unsigned long vaddr, int nr, int pipe_fd, unsigned flags);
+
 /*
  * Create a shallow copy of page_read object.
  * The new object shares the pagemap structures with the original, but

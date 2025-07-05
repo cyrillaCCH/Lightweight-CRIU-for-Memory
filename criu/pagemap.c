@@ -492,6 +492,58 @@ static int read_pagemap_page(struct page_read *pr, unsigned long vaddr, int nr, 
 	return 1;
 }
 
+int read_local_page_to_pipe(struct page_read *pr, unsigned long vaddr, int nr, int pipe_fd, unsigned flags) {
+	ssize_t ret = -1;
+	unsigned long len = nr * PAGE_SIZE;
+	int fd;
+	size_t curr = 0;
+	off_t off;
+
+	pr_info("pr%lu-%u Read %lx %u pages\n", pr->img_id, pr->id, vaddr, nr);
+	pagemap_bound_check(pr->pe, vaddr, nr);
+
+	fd = img_raw_fd(pr->pi);
+	if (fd < 0) {
+		pr_err("Failed getting raw image fd\n");
+		goto err;
+	}
+
+	if (pr->sync(pr))
+		goto err;
+
+	pr_debug("\tpr%lu-%u Read page from self %lx/%" PRIx64 "\n", pr->img_id, pr->id, pr->cvaddr, pr->pi_off);
+	while (1) {
+		off = pr->pi_off + curr;
+		ret = splice(fd, &off, pipe_fd, NULL, len - curr, SPLICE_F_MOVE);// pread(fd, buf + curr, len - curr, pr->pi_off + curr);
+		if (ret < 1) {
+			pr_perror("Can't read mapping page %zd", ret);
+			goto err;
+		}
+		curr += ret;
+		if (curr == len)
+			break;
+	}
+
+	if (opts.auto_dedup && !pr->disable_dedup) {
+		ret = punch_hole(pr, pr->pi_off, len, false);
+		if (ret == -1)
+			goto err;
+	}
+
+err:
+	if (ret == 0 && pr->io_complete)
+		ret = pr->io_complete(pr, vaddr, nr);
+
+	pr->pi_off += len;
+
+	if (ret < 0)
+		return ret;
+
+	pr->cvaddr += nr * PAGE_SIZE;
+
+	return 1;
+}
+
 static void free_pagemaps(struct page_read *pr)
 {
 	int i;

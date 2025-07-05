@@ -2474,8 +2474,6 @@ static int restore_memory(pid_t pid)
 	MmEntry *mm;
 	struct mem_rst_args *arg;
 	int page_pipe[2];
-	char page_buf[PAGE_SIZE];
-	struct iovec page_iov = { page_buf, sizeof(page_buf) };
 
 	memset(addr, 0, sizeof(void*) * num_lines * 2);
 	if (parse_maps_restore(pid, addr)) // must parse before infection
@@ -2674,12 +2672,9 @@ static int restore_memory(pid_t pid)
 			if (va < vma->start)
 				return -1;
 
-			ret = pr.read_pages(&pr, va, 1, page_buf, 0);
-
+			ret = read_local_page_to_pipe(&pr, va, 1, page_pipe[1], 0);
 			if (ret < 0)
 				return -1;
-
-			vmsplice(page_pipe[1], &page_iov, 1, 0);
 
 			arg->addr = decode_pointer(va);
 
