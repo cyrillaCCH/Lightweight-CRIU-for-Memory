@@ -297,6 +297,7 @@ int rmrf(char *path);
 
 #define LAST_PID_PATH "sys/kernel/ns_last_pid"
 #define PID_MAX_PATH  "sys/kernel/pid_max"
+#define PIPE_LEN_MAX_PATH "sys/fs/pipe-max-size"
 
 #define block_sigmask(saved_mask, sig_mask)                                       \
 	({                                                                        \

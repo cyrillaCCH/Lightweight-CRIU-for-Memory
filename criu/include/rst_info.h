@@ -104,6 +104,7 @@ struct mem_rst_args
 	union {
 		struct {
 			void *addr;
+			int nr_pages;
 			int pipe_fd;
 		};
 		struct {

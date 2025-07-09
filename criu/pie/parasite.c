@@ -874,7 +874,7 @@ static int parasite_restore_file_priv_vmas(struct mem_rst_args *args)
 
 static int parasite_restore_memory(struct mem_rst_args *args)
 {
-	struct iovec iov = { args->addr, PAGE_SIZE };
+	struct iovec iov = { args->addr, PAGE_SIZE * args->nr_pages };
 	sys_vmsplice(args->pipe_fd, &iov, 1, 0);
 
 	return 0;

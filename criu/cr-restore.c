@@ -2560,12 +2560,14 @@ static int restore_file_vmas(struct parasite_ctl *ctl, struct mem_rst_args *arg,
 
 static int restore_page_content(struct parasite_ctl *ctl, struct mem_rst_args *arg, MmEntry *mm, int num_lines, void *addr[][2], pid_t pid) {
 	int i, j, k;
-	long ret;
+	long ret = -1;
 	struct page_read pr;
 	int page_pipe[2];
 	VmaEntry *vma;
 	unsigned long va;
 	unsigned int nr_restored = 0;
+	int fd, pipe_max_len;
+	char buf[32];
 
 	if (open_page_read(pid, &pr, PR_TASK) <= 0)
 		return -1;
@@ -2582,16 +2584,44 @@ static int restore_page_content(struct parasite_ctl *ctl, struct mem_rst_args *a
 
 	if (compel_rpc_sync(PARASITE_CMD_RECV_FD, ctl)) {
 		pr_err("Can't run parasite command PARASITE_CMD_RECV_FD\n");
-		return -1;
+		goto err;
 	}
 
 	close(page_pipe[0]);
+
+	fd = open_proc(PROC_GEN, PIPE_LEN_MAX_PATH);
+	if (fd < 0)
+		goto err;
+
+	if (read(fd, buf, sizeof(buf)) <= 0 || sscanf(buf, "%d", &pipe_max_len) <= 0) {
+		pr_perror("Failed to read pipe max size from /proc/%s", PIPE_LEN_MAX_PATH);
+		close(fd);
+		goto err;
+	}
+
+	close(fd);
+
+	if (fcntl(page_pipe[1], F_SETPIPE_SZ, pipe_max_len) < 0) {
+        pr_perror("fcntl F_SETPIPE_SZ failed\n");
+		close(page_pipe[1]);
+		goto err;
+    }
+
+	pipe_max_len = fcntl(page_pipe[1], F_GETPIPE_SZ);
+	if (pipe_max_len < 0) {
+        pr_perror("fcntl F_GETPIPE_SZ failed\n");
+		close(page_pipe[1]);
+		goto err;
+    }
+
+	pr_info("Set page pipe size to %d bytes (%lu pages)\n", pipe_max_len, pipe_max_len / PAGE_SIZE);
 
 	i = 0;
 	k = 0;
 	vma = mm->vmas[i];
 	while (1) {
 		unsigned long nr_pages;
+		bool skip = false;
 
 		ret = pr.advance(&pr);
 		if (ret <= 0)
@@ -2600,47 +2630,53 @@ static int restore_page_content(struct parasite_ctl *ctl, struct mem_rst_args *a
 		va = (unsigned long)decode_pointer(pr.pe->vaddr);
 		nr_pages = pr.pe->nr_pages;
 
+		while (va >= vma->end) {
+			if (i == mm->n_vmas - 1)
+				goto err;
+			vma = mm->vmas[++i];
+		}
+		for (; k < num_lines && vma->end > (uint64_t)addr[k][0]; k++) // Skip the VMAs that didn't be unmapped. And they may not have PROT_WRITE
+			if (vma->start >= (uint64_t)addr[k][0] && vma->end <= (uint64_t)addr[k][1]) {
+				skip = true;
+				break;
+			}
+		if (skip) {
+			pr.skip_pages(&pr, PAGE_SIZE * nr_pages);
+			continue;
+		}
+
+		if (va < vma->start)
+			goto err;
+
 		for (j = 0; j < nr_pages; j++) {
-			bool skip = false;
+			int nr = min_t(int, nr_pages - j, pipe_max_len / PAGE_SIZE);
 
-			while (va >= vma->end) {
-				if (i == mm->n_vmas - 1)
-					return -1;
-				vma = mm->vmas[++i];
-			}
-			for (; k < num_lines && vma->end > (uint64_t)addr[k][0]; k++) // Skip the VMAs that didn't be unmapped. And they may not have PROT_WRITE
-				if (vma->start >= (uint64_t)addr[k][0] && vma->end <= (uint64_t)addr[k][1]) {
-					skip = true;
-					break;
-				}
-			if (skip) {
-				pr.skip_pages(&pr, PAGE_SIZE);
-				continue;
-			}
-
-			if (va < vma->start)
-				return -1;
-
-			ret = read_local_page_to_pipe(&pr, va, 1, page_pipe[1], 0);
+			ret = read_local_page_to_pipe(&pr, va, nr, page_pipe[1], 0);
 			if (ret < 0)
-				return -1;
+				goto err;
 
 			arg->addr = decode_pointer(va);
+			arg->nr_pages = nr;
 
-			pr_debug("Restore page %d of VMA %d at address %p\n", j, i, arg->addr);
+			pr_debug("Restore %u pages of VMA %d at address %p\n", nr, i, arg->addr);
 
 			if (compel_rpc_call_sync(PARASITE_CMD_RESTORE_PAGES, ctl)) {
 				pr_err("Can't run parasite command PARASITE_CMD_RESTORE_PAGES\n");
-				return -1;
+				goto err;
 			}
 
-			va += PAGE_SIZE;
-			nr_restored++;
+			va += PAGE_SIZE * nr;
+			nr_restored += nr;
+			j += nr - 1;
 		}
 	}
 
+	ret = 0;
 	pr_info("nr_restored_pages: %d\n", nr_restored);
-	return 0;
+
+err:
+	close(page_pipe[1]);
+	return ret;
 }
 
 static int restore_vma_settings(struct parasite_ctl *ctl, struct mem_rst_args *arg, MmEntry *mm, int num_lines, void *addr[][2]) {

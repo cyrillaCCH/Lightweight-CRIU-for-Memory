@@ -511,10 +511,10 @@ int read_local_page_to_pipe(struct page_read *pr, unsigned long vaddr, int nr, i
 	if (pr->sync(pr))
 		goto err;
 
-	pr_debug("\tpr%lu-%u Read page from self %lx/%" PRIx64 "\n", pr->img_id, pr->id, pr->cvaddr, pr->pi_off);
+	pr_debug("\tpr%lu-%u Read %d pages from self %lx/%" PRIx64 "\n", pr->img_id, pr->id, nr, pr->cvaddr, pr->pi_off);
 	while (1) {
 		off = pr->pi_off + curr;
-		ret = splice(fd, &off, pipe_fd, NULL, len - curr, SPLICE_F_MOVE);// pread(fd, buf + curr, len - curr, pr->pi_off + curr);
+		ret = splice(fd, &off, pipe_fd, NULL, len - curr, SPLICE_F_MOVE);
 		if (ret < 1) {
 			pr_perror("Can't read mapping page %zd", ret);
 			goto err;
