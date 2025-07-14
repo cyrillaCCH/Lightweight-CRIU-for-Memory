@@ -2354,28 +2354,23 @@ int prepare_dummy_task_state(struct pstree_item *pi)
 
 static int rm_imgs(pid_t pid)
 {
-	char cmd[64];
-	sprintf(cmd, "rm -f %s/inventory.img", opts.imgs_dir);
-	if (system(cmd) < 0)
-		return -1;
-	sprintf(cmd, "rm -f %s/irmap-cache", opts.imgs_dir);
-	if (system(cmd) < 0)
-		return -1;
-	sprintf(cmd, "rm -f %s/stats-dump", opts.imgs_dir);
-	if (system(cmd) < 0)
-		return -1;
-	sprintf(cmd, "rm -f %s/pages-1.img", opts.imgs_dir);
-	if (system(cmd) < 0)
-		return -1;
-	sprintf(cmd, "rm -f %s/mm-%d.img", opts.imgs_dir, pid);
-	if (system(cmd) < 0)
-		return -1;
-	sprintf(cmd, "rm -f %s/files.img", opts.imgs_dir);
-	if (system(cmd) < 0)
-		return -1;
-	sprintf(cmd, "rm -f %s/pagemap-%d.img", opts.imgs_dir, pid);
-	if (system(cmd) < 0)
-		return -1;
+	char *image_files_list[] = {
+		"inventory.img",
+		"irmap-cache",
+		"stats-dump",
+		"pages-1.img",
+		"mm-*.img",
+		"files.img",
+		"pagemap-*.img"
+	};
+	int list_sz = sizeof(image_files_list) / sizeof(char*);
+
+	for (int i = 0; i < list_sz; i++) {
+		char cmd[64];
+		sprintf(cmd, "rm -f %s/%s", opts.imgs_dir, image_files_list[i]);
+		if (system(cmd) < 0)
+			return -1;
+	}
 
 	return 0;
 }
@@ -2457,23 +2452,12 @@ static int read_mm(pid_t pid, MmEntry **mm)
 }
 
 static int mmap_all_vmas_back(struct parasite_ctl *ctl, MmEntry *mm, int num_lines, void *addr[][2]) {
-	int i = 0, j = 0;
 	long ret;
 
-	for (; i < mm->n_vmas; i++) {
+	for (int i = 0; i < mm->n_vmas; i++) {
 		unsigned long size;
 		int flag = 0;
 		VmaEntry *vma;
-		bool skip = false;
-
-		for (; j < num_lines && mm->vmas[i]->end > (uint64_t)addr[j][0]; j++)
-			if (mm->vmas[i]->start >= (uint64_t)addr[j][0] && mm->vmas[i]->end <= (uint64_t)addr[j][1]) {
-				skip = true;
-				break;
-			}
-
-		if (skip)
-			continue;
 
 		vma = mm->vmas[i];
 		size = vma_entry_len(vma);
@@ -2502,44 +2486,34 @@ static int mmap_all_vmas_back(struct parasite_ctl *ctl, MmEntry *mm, int num_lin
 }
 
 static int restore_file_vmas(struct parasite_ctl *ctl, struct mem_rst_args *arg, MmEntry *mm, int num_lines, void *addr[][2]) {
-	int i = 0, j = 0, k = 0;
+	int i = 0, j = 0;
 
 	for (; i < mm->n_vmas; i++) {
-		bool skip = false;
-
 		if ((vma_entry_is(mm->vmas[i], VMA_FILE_PRIVATE) && mm->vmas[i]->fd <= 0)) {
-			for (; k < num_lines && mm->vmas[i]->end > (uint64_t)addr[k][0]; k++)
-				if (mm->vmas[i]->start >= (uint64_t)addr[k][0] && mm->vmas[i]->end <= (uint64_t)addr[k][1]) {
-					skip = true;
-					break;
-				}
+			struct vma_area *vma_area;
+			struct reg_file_info *rfi;
 
-			if (!skip) {
-				struct vma_area *vma_area;
-				struct reg_file_info *rfi;
+			arg->vmas[j] = *mm->vmas[i];
 
-				arg->vmas[j] = *mm->vmas[i];
+			vma_area = alloc_vma_area();
+			if (!vma_area)
+				return -1;
 
-				vma_area = alloc_vma_area();
-				if (!vma_area)
-					return -1;
-
-				vma_area->e = mm->vmas[i];
-				if (collect_filemap(vma_area)) {
-					pr_err("Can't collect filemap\n");
-					return -1;
-				}
-
-				rfi = container_of(vma_area->vmfd, struct reg_file_info, d);
-
-				BUILD_BUG_ON(strlen(rfi->rfe->name) > PATH_LEN - 1);
-				if (snprintf(arg->path[j++], PATH_LEN, "%s", rfi->rfe->name) < 0) {
-					pr_err("Can't copy path\n");
-					return -1;
-				}
-
-				free(vma_area);
+			vma_area->e = mm->vmas[i];
+			if (collect_filemap(vma_area)) {
+				pr_err("Can't collect filemap\n");
+				return -1;
 			}
+
+			rfi = container_of(vma_area->vmfd, struct reg_file_info, d);
+
+			BUILD_BUG_ON(strlen(rfi->rfe->name) > PATH_LEN - 1);
+			if (snprintf(arg->path[j++], PATH_LEN, "%s", rfi->rfe->name) < 0) {
+				pr_err("Can't copy path\n");
+				return -1;
+			}
+
+			free(vma_area);
 		}
 
 		if (i == mm->n_vmas - 1) {
@@ -2559,7 +2533,7 @@ static int restore_file_vmas(struct parasite_ctl *ctl, struct mem_rst_args *arg,
 }
 
 static int restore_page_content(struct parasite_ctl *ctl, struct mem_rst_args *arg, MmEntry *mm, int num_lines, void *addr[][2], pid_t pid) {
-	int i, j, k;
+	int i, j;
 	long ret = -1;
 	struct page_read pr;
 	int page_pipe[2];
@@ -2617,11 +2591,9 @@ static int restore_page_content(struct parasite_ctl *ctl, struct mem_rst_args *a
 	pr_info("Set page pipe size to %d bytes (%lu pages)\n", pipe_max_len, pipe_max_len / PAGE_SIZE);
 
 	i = 0;
-	k = 0;
 	vma = mm->vmas[i];
 	while (1) {
 		unsigned long nr_pages;
-		bool skip = false;
 
 		ret = pr.advance(&pr);
 		if (ret <= 0)
@@ -2634,15 +2606,6 @@ static int restore_page_content(struct parasite_ctl *ctl, struct mem_rst_args *a
 			if (i == mm->n_vmas - 1)
 				goto err;
 			vma = mm->vmas[++i];
-		}
-		for (; k < num_lines && vma->end > (uint64_t)addr[k][0]; k++) // Skip the VMAs that didn't be unmapped. And they may not have PROT_WRITE
-			if (vma->start >= (uint64_t)addr[k][0] && vma->end <= (uint64_t)addr[k][1]) {
-				skip = true;
-				break;
-			}
-		if (skip) {
-			pr.skip_pages(&pr, PAGE_SIZE * nr_pages);
-			continue;
 		}
 
 		if (va < vma->start)
@@ -2680,19 +2643,10 @@ err:
 }
 
 static int restore_vma_settings(struct parasite_ctl *ctl, struct mem_rst_args *arg, MmEntry *mm, int num_lines, void *addr[][2]) {
-	int i = 0, j = 0, k = 0;
+	int i = 0, j = 0;
 
 	for (; i < mm->n_vmas; i++) {
-		bool skip = false;
-
-		for (; k < num_lines && mm->vmas[i]->end > (uint64_t)addr[k][0]; k++)
-			if (mm->vmas[i]->start >= (uint64_t)addr[k][0] && mm->vmas[i]->end <= (uint64_t)addr[k][1]) {
-				skip = true;
-				break;
-			}
-
-		if (!skip)
-			arg->vmas[j] = *mm->vmas[i];
+		arg->vmas[j] = *mm->vmas[i];
 
 		if (i == mm->n_vmas - 1) {
 			for (; j < NUM_VMAS; j++)

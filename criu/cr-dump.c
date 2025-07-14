@@ -501,6 +501,8 @@ static int dump_task_mm(pid_t pid, const struct proc_pid_stat *stat, const struc
 	pr_info("----------------------------------------\n");
 
 	mme.n_vmas = vma_area_list->nr;
+	if (x_vma_skipped)
+		mme.n_vmas--;
 	mme.vmas = xmalloc(mme.n_vmas * sizeof(VmaEntry *));
 	if (!mme.vmas)
 		return -1;
@@ -521,7 +523,8 @@ static int dump_task_mm(pid_t pid, const struct proc_pid_stat *stat, const struc
 		if (ret)
 			goto err;
 
-		mme.vmas[i++] = vma;
+		if (vma_area->e->start != x_vma_skipped)
+			mme.vmas[i++] = vma;
 
 		if (vma_entry_is(vma, VMA_AREA_AIORING)) {
 			ret = dump_aio_ring(&mme, vma_area);

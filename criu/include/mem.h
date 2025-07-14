@@ -32,6 +32,8 @@ extern unsigned long dump_pages_args_size(struct vm_area_list *vmas);
 extern int parasite_dump_pages_seized(struct pstree_item *item, struct vm_area_list *vma_area_list,
 				      struct mem_dump_ctl *mdc, struct parasite_ctl *ctl);
 
+extern uint64_t x_vma_skipped;
+
 #define PME_PRESENT	  (1ULL << 63)
 #define PME_SWAP	  (1ULL << 62)
 #define PME_FILE	  (1ULL << 61)

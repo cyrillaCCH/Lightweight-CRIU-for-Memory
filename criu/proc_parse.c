@@ -75,6 +75,8 @@ struct buffer {
 static struct buffer __buf;
 static char *buf = __buf.buf;
 
+uint64_t x_vma_skipped = 0;
+
 /*
  * This is how AIO ring buffers look like in proc
  */
@@ -860,21 +862,26 @@ int parse_smaps(pid_t pid, struct vm_area_list *vma_area_list, dump_filemap_t du
 
 		pr_debug("Handling VMA with the following smaps entry: %s\n", str);
 		if (opts.mode == CR_MEM_DUMP) {
-			if ((first_exe_vma_found && !should_mem_dump_vma(str + path_off, r, w, x, s)) // parasite needs at least one executable VMA to infect
+			bool should_dump = should_mem_dump_vma(str + path_off, r, w, x, s);
+
+			if ((!should_dump && (first_exe_vma_found || !(vma_area->e->prot & PROT_EXEC))) // parasite needs at least one executable VMA to infect
 				|| handle_vma(pid, vma_area, str + path_off, map_files_dir, &vfi, &prev_vfi, &vm_file_fd)) {
 				xfree(vma_area);
 				vma_area = NULL;
 				continue;
 			}
+
+			if ((vma_area->e->prot & PROT_EXEC)
+			&& vma_area->e->start < kdat.task_size
+			&& vma_area_len(vma_area) >= PARASITE_START_AREA_MIN) {
+				if (!first_exe_vma_found && !should_dump)
+					x_vma_skipped = vma_area->e->start;
+				first_exe_vma_found = true;
+			}
 		} else {
 			if (handle_vma(pid, vma_area, str + path_off, map_files_dir, &vfi, &prev_vfi, &vm_file_fd))
 				goto err;
 		}
-
-		if ((vma_area->e->prot & PROT_EXEC)
-			&& vma_area->e->start < kdat.task_size
-			&& vma_area_len(vma_area) >= PARASITE_START_AREA_MIN)
-			first_exe_vma_found = true;
 
 		if (vma_entry_is(vma_area->e, VMA_FILE_PRIVATE) || vma_entry_is(vma_area->e, VMA_FILE_SHARED)) {
 			if (dump_filemap && dump_filemap(vma_area, vm_file_fd))
