@@ -864,16 +864,18 @@ int parse_smaps(pid_t pid, struct vm_area_list *vma_area_list, dump_filemap_t du
 		if (opts.mode == CR_MEM_DUMP) {
 			bool should_dump = should_mem_dump_vma(str + path_off, r, w, x, s);
 
-			if ((!should_dump && (first_exe_vma_found || !(vma_area->e->prot & PROT_EXEC))) // parasite needs at least one executable VMA to infect
+			bool parasite_reserve = (vma_area->e->prot & PROT_EXEC) && !(vma_area->e->flags & MAP_SHARED); // parasite needs at least one executable & private VMA to infect
+
+			if ((!should_dump && (first_exe_vma_found || !parasite_reserve)) 
 				|| handle_vma(pid, vma_area, str + path_off, map_files_dir, &vfi, &prev_vfi, &vm_file_fd)) {
 				xfree(vma_area);
 				vma_area = NULL;
 				continue;
 			}
 
-			if ((vma_area->e->prot & PROT_EXEC)
-			&& vma_area->e->start < kdat.task_size
-			&& vma_area_len(vma_area) >= PARASITE_START_AREA_MIN) {
+			if (parasite_reserve && 
+				vma_area->e->start < kdat.task_size && 
+				vma_area_len(vma_area) >= PARASITE_START_AREA_MIN) {
 				if (!first_exe_vma_found && !should_dump)
 					x_vma_skipped = vma_area->e->start;
 				first_exe_vma_found = true;

@@ -54,6 +54,8 @@ unsigned long get_exec_start(struct vm_area_list *vmas)
 			continue;
 		if (!(vma_area->e->prot & PROT_EXEC))
 			continue;
+		if (vma_area->e->flags == MAP_SHARED)
+			continue;
 
 		len = vma_area_len(vma_area);
 		if (len < PARASITE_START_AREA_MIN) {

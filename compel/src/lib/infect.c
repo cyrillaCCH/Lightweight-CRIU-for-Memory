@@ -1199,7 +1199,7 @@ static unsigned long find_executable_area(int pid)
 		end = strtoul(f + 1, &f, 16);
 
 		/* f now points at " rwx" (yes, with space) part */
-		if (f[3] == 'x') {
+		if (f[3] == 'x' && f[4] != 's') {
 			BUG_ON(end - start < PARASITE_START_AREA_MIN);
 			ret = start;
 			break;
