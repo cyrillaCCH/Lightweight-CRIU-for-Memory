@@ -2359,16 +2359,20 @@ static int rm_imgs(pid_t pid)
 		"irmap-cache",
 		"stats-dump",
 		"pages-1.img",
-		"mm-*.img",
+		"mm-%d.img",
 		"files.img",
-		"pagemap-*.img"
+		"pagemap-%d.img"
 	};
+	char filepath[256];
 	int list_sz = sizeof(image_files_list) / sizeof(char*);
 
 	for (int i = 0; i < list_sz; i++) {
-		char cmd[64];
-		sprintf(cmd, "rm -f %s/%s", opts.imgs_dir, image_files_list[i]);
-		if (system(cmd) < 0)
+		if (strstr(image_files_list[i], "%d") != NULL)
+            snprintf(filepath, sizeof(filepath), image_files_list[i], pid);
+        else
+            snprintf(filepath, sizeof(filepath), "%s", image_files_list[i]);
+		
+		if (unlink(filepath) < 0)
 			return -1;
 	}
 
