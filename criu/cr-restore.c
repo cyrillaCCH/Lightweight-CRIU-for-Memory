@@ -2650,7 +2650,7 @@ static int restore_vma_settings(struct parasite_ctl *ctl, struct mem_rst_args *a
 	int i = 0, j = 0;
 
 	for (; i < mm->n_vmas; i++) {
-		arg->vmas[j] = *mm->vmas[i];
+		arg->vmas[j++] = *mm->vmas[i];
 
 		if (i == mm->n_vmas - 1) {
 			for (; j < NUM_VMAS; j++)
