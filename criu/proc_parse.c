@@ -860,6 +860,12 @@ int parse_smaps(pid_t pid, struct vm_area_list *vma_area_list, dump_filemap_t du
 			goto err;
 		}
 
+		vma_area->e->name = xmalloc(strlen(str + path_off) + 1);
+		if (strcpy(vma_area->e->name, str + path_off) == NULL) {
+			pr_err("strcpy failed\n");
+			goto err;
+		}
+
 		pr_debug("Handling VMA with the following smaps entry: %s\n", str);
 		if (opts.mode == CR_MEM_DUMP) {
 			bool should_dump = should_mem_dump_vma(str + path_off, r, w, x, s);

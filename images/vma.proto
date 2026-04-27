@@ -24,4 +24,7 @@ message vma_entry {
 
 	/* file status flags */
 	optional uint32		fdflags	= 10 [(criu).hex = true];
+
+	/* name of the VMA, mostly for anon: names */
+	optional string		name	= 11;
 }

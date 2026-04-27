@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include <sys/ioctl.h>
 #include <sys/uio.h>
+#include <sys/prctl.h>
 
 #include "linux/rseq.h"
 
@@ -944,6 +945,38 @@ static int parasite_restore_vma_settings(struct mem_rst_args *args)
 		}
 	}
 	pr_info("madvise() bits restored\n");
+
+	// Restore VMA name
+	pr_info("Restore VMAs name\n");
+	for (i = 0; i < NUM_VMAS; i++) {
+		char *name, *c;
+		
+		if (args->vmas[i].start == 0)
+			continue;
+
+		vma = &args->vmas[i];
+		name = args->path[i];
+
+		if (!name || name[0] != '[' || name[1] != 'a' ||
+		    name[2] != 'n' || name[3] != 'o' ||
+		    name[4] != 'n' || name[5] != ':')
+			continue;
+
+		// Do NOT include "[anon:]", the kernel adds that
+		c = name;
+		for (c = name; *c; c++) {
+			if (*c == ']') {
+				*c = '\0';
+				break;
+			}
+		}
+
+		ret = sys_prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, vma->start, vma_entry_len(vma), (unsigned long)name + 6);
+		if (ret < 0)
+			pr_info("Can't set VMA name for %lx-%lx\n", vma->start, vma->end);
+
+	}
+	pr_info("VMAs name restored\n");
 
 	return 0;
 }
