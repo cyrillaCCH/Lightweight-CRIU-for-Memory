@@ -1765,6 +1765,9 @@ static int root_only_init(void)
 	if (opts.unprivileged)
 		return 0;
 
+	if (opts.mode == CR_MEM_DUMP || opts.mode == CR_MEM_RESTORE)
+		return 0;
+
 	if (!ret && kerndat_loginuid()) {
 		pr_err("kerndat_loginuid failed when initializing kerndat.\n");
 		ret = -1;

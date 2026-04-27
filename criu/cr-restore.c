@@ -17,6 +17,7 @@
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sched.h>
+#include <linux/userfaultfd.h>
 
 #include "types.h"
 #include <compel/ptrace.h>
@@ -2352,33 +2353,6 @@ int prepare_dummy_task_state(struct pstree_item *pi)
 	return 0;
 }
 
-static int rm_imgs(pid_t pid)
-{
-	char *image_files_list[] = {
-		"inventory.img",
-		"irmap-cache",
-		"stats-dump",
-		"pages-1.img",
-		"mm-%d.img",
-		"files.img",
-		"pagemap-%d.img"
-	};
-	char filepath[256];
-	int list_sz = sizeof(image_files_list) / sizeof(char*);
-
-	for (int i = 0; i < list_sz; i++) {
-		if (strstr(image_files_list[i], "%d") != NULL)
-            snprintf(filepath, sizeof(filepath), image_files_list[i], pid);
-        else
-            snprintf(filepath, sizeof(filepath), "%s", image_files_list[i]);
-		
-		if (unlink(filepath) < 0)
-			return -1;
-	}
-
-	return 0;
-}
-
 static int count_threads(pid_t pid)
 {
 	char path[PATH_MAX];
@@ -2650,6 +2624,9 @@ err:
 	return ret;
 }
 
+#include "mtd.h"
+#include "../../mtd/mtd_proto.h"
+
 static int restore_vma_settings(struct parasite_ctl *ctl, struct mem_rst_args *arg, MmEntry *mm, int num_lines, void *addr[][2]) {
 	int i = 0, j = 0;
 
@@ -2742,6 +2719,69 @@ static int restore_memory(pid_t pid)
 	if (restore_vma_settings(ctl, arg, mm, num_lines, addr) < 0)
 		return -1;
 
+	if (mtd_connect() == 0) {
+		int uffd;
+		struct uffdio_api api = { 0 };
+
+		if (compel_rpc_call(PARASITE_CMD_GET_UFFD, ctl)) {
+			pr_err("Can't call GET_UFFD for pid %d\n", pid);
+			return -1;
+		}
+
+		if (compel_util_recv_fd(ctl, &uffd)) {
+			pr_err("Can't receive uffd from parasite for pid %d\n", pid);
+			return -1;
+		}
+
+		if (compel_rpc_sync(PARASITE_CMD_GET_UFFD, ctl)) {
+			pr_err("Can't get uffd ack from parasite for pid %d\n", pid);
+			close(uffd);
+			return -1;
+		}
+
+		api.api = UFFD_API;
+		api.features = UFFD_FEATURE_PAGEFAULT_FLAG_WP;
+		if (ioctl(uffd, UFFDIO_API, &api)) {
+			pr_perror("Can't setup uffd API for pid %d", pid);
+			close(uffd);
+			return -1;
+		}
+
+		for (int i = 0; i < mm->n_vmas; i++) {
+			VmaEntry *v = mm->vmas[i];
+
+			struct uffdio_register reg;
+			struct uffdio_writeprotect wp;
+
+			reg.range.start = v->start;
+			reg.range.len = v->end - v->start;
+			reg.mode = UFFDIO_REGISTER_MODE_WP;
+			if (ioctl(uffd, UFFDIO_REGISTER, &reg)) {
+				pr_perror("Can't register VMA %p-%p for WP", (void*)(uintptr_t)v->start, (void*)(uintptr_t)v->end);
+				continue;
+			}
+
+			for (unsigned long addr = v->start; addr < v->end; addr += PAGE_SIZE) {
+				wp.range.start = addr;
+				wp.range.len = PAGE_SIZE;
+				wp.mode = UFFDIO_WRITEPROTECT_MODE_WP;
+				if (ioctl(uffd, UFFDIO_WRITEPROTECT, &wp) < 0 && errno != ENOENT) {
+					pr_perror("Can't write-protect VMA page %p", (void*)(uintptr_t)addr);
+				}
+			}
+		}
+
+		if (mtd_register_uffd(pid, uffd) < 0) {
+			pr_err("Can't register uffd to mtd for pid %d\n", pid);
+			close(uffd);
+			return -1;
+		}
+		close(uffd);
+	} else if (do_task_reset_dirty_track(pid)) {
+		pr_err("Can't reset process softdirty bits\n");
+		return -1;
+	}
+
 	if (compel_cure(ctl)) {
 		pr_err("Can't cure victim\n");
 		return -1;
@@ -2753,11 +2793,6 @@ static int restore_memory(pid_t pid)
 	}
 
 	kill(pid, SIGCONT);
-
-	if (rm_imgs(pid) < 0) {
-		pr_err("Can't remove images\n");
-		return -1;
-	}
 
 	return 0;
 }

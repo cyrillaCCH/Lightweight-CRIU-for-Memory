@@ -1071,6 +1071,9 @@ bad_arg:
 	return 1;
 }
 
+#include "mtd.h"
+#include "../../mtd/mtd_proto.h"
+
 int check_options(void)
 {
 	if (opts.tcp_established_ok)
@@ -1125,8 +1128,13 @@ int check_options(void)
 	}
 
 	if (opts.track_mem && !kdat.has_dirty_track) {
-		pr_err("Tracking memory is not available. Consider omitting --track-mem option.\n");
-		return 1;
+		if (mtd_connect() == 0) {
+			if (mtd_check_pid(opts.tree_id) != MTD_STATUS_OK)
+				opts.track_mem = false;
+		} else {
+			pr_err("Tracking memory is not available. Consider omitting --track-mem option.\n");
+			return 1;
+		}
 	}
 
 	if (check_namespace_opts()) {

@@ -636,6 +636,22 @@ static int get_proc_fd(void)
 	return open_detach_mount(proc_mountpoint);
 }
 
+static int parasite_get_uffd(void)
+{
+	int fd, ret, tsock;
+
+	fd = sys_userfaultfd(O_CLOEXEC | O_NONBLOCK);
+	if (fd < 0) {
+		pr_err("Can't open userfaultfd (%d)\n", fd);
+		return -1;
+	}
+
+	tsock = parasite_get_rpc_sock();
+	ret = send_fd(tsock, NULL, 0, fd);
+	sys_close(fd);
+	return ret;
+}
+
 static int parasite_get_proc_fd(void)
 {
 	int fd, ret, tsock;
@@ -1052,6 +1068,9 @@ int parasite_daemon_cmd(int cmd, void *args)
 		break;
 	case PARASITE_CMD_RECV_FD:
 		ret = parasite_recv_fd(args);
+		break;
+	case PARASITE_CMD_GET_UFFD:
+		ret = parasite_get_uffd();
 		break;
 	default:
 		pr_err("Unknown command in parasite daemon thread leader: %d\n", cmd);

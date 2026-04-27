@@ -125,7 +125,7 @@ bool handle_vma_plugin(int *fd, struct stat *stat)
 }
 
 static void __parse_vmflags(char *buf, u32 *flags, u64 *madv, int *io_pf,
-			    int *shstk)
+			    int *shstk, int *uffd_wp)
 {
 	char *tok;
 
@@ -172,6 +172,9 @@ static void __parse_vmflags(char *buf, u32 *flags, u64 *madv, int *io_pf,
 		if (_vmflag_match(tok, "ss"))
 			*shstk = 1;
 
+		if (_vmflag_match(tok, "uw"))
+			*uffd_wp = 1;
+
 		/*
 		 * Anything else is just ignored.
 		 */
@@ -183,20 +186,25 @@ static void __parse_vmflags(char *buf, u32 *flags, u64 *madv, int *io_pf,
 void parse_vmflags(char *buf, u32 *flags, u64 *madv, int *io_pf)
 {
 	int shstk = 0;
+	int uffd_wp = 0;
 
-	__parse_vmflags(buf, flags, madv, io_pf, &shstk);
+	__parse_vmflags(buf, flags, madv, io_pf, &shstk, &uffd_wp);
 }
 
 static void parse_vma_vmflags(char *buf, struct vma_area *vma_area)
 {
 	int io_pf = 0;
 	int shstk = 0;
+	int uffd_wp = 0;
 
 	__parse_vmflags(buf, &vma_area->e->flags, &vma_area->e->madv, &io_pf,
-			&shstk);
+			&shstk, &uffd_wp);
 
 	if (shstk)
 		vma_area->e->status |= VMA_AREA_SHSTK;
+
+	if (uffd_wp)
+		vma_area->e->status |= (1 << 16); // Mark as UFFD tracked
 
 	/*
 	 * vmsplice doesn't work for VM_IO and VM_PFNMAP mappings, the
@@ -773,6 +781,9 @@ static int task_size_check(pid_t pid, VmaEntry *entry)
 #endif
 }
 
+#include "mtd.h"
+#include "../../mtd/mtd_proto.h"
+
 int parse_smaps(pid_t pid, struct vm_area_list *vma_area_list, dump_filemap_t dump_filemap)
 {
 	struct vma_area *vma_area = NULL;
@@ -872,6 +883,26 @@ int parse_smaps(pid_t pid, struct vm_area_list *vma_area_list, dump_filemap_t du
 			bool should_dump = should_mem_dump_vma(str + path_off, r, w, x, s);
 
 			bool parasite_reserve = (vma_area->e->prot & PROT_EXEC) && !(vma_area->e->flags & MAP_SHARED); // parasite needs at least one executable & private VMA to infect
+
+#ifdef ANDROID
+			if (should_dump && opts.track_mem && !kdat.has_dirty_track) {
+				char *full_dump[] = {
+									"[anon:dalvik-free list large object space]",
+									"[anon:scudo",
+									"[anon:stack_and_tls"
+								};
+				int full_dump_sz = sizeof(full_dump) / sizeof(char*);
+				for (int i = 0; i < full_dump_sz; i++) {
+					if (!strncmp(str + path_off, full_dump[i], strlen(full_dump[i]))) {
+						if (mtd_mark_dirty_range(pid, start, end - start)) {
+							pr_err("mtd_mark_dirty_range failed\n");
+							return -1;
+						} else 
+							break;
+					}
+				}
+			}
+#endif
 
 			if ((!should_dump && (first_exe_vma_found || !parasite_reserve)) 
 				|| handle_vma(pid, vma_area, str + path_off, map_files_dir, &vfi, &prev_vfi, &vm_file_fd)) {

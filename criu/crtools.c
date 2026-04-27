@@ -116,6 +116,8 @@ static int parse_criu_mode(char *mode)
 	return 0;
 }
 
+#include "mtd.h"
+
 int main(int argc, char *argv[], char *envp[])
 {
 	int ret = -1;
@@ -322,7 +324,9 @@ int main(int argc, char *argv[], char *envp[])
 			return 1;
 		}
 
-		return cr_mem_dump_tasks(opts.tree_id) != 0;
+		ret = cr_mem_dump_tasks(opts.tree_id);
+		mtd_disconnect();
+		return ret != 0;
 	}
 
 	if (opts.mode == CR_RESTORE) {
@@ -345,6 +349,7 @@ int main(int argc, char *argv[], char *envp[])
 			goto opt_pid_missing;
 
 		ret = cr_mem_restore_tasks(opts.tree_id);
+		mtd_disconnect();
 
 		return ret != 0;
 	}

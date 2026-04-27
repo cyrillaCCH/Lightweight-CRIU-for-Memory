@@ -35,6 +35,9 @@
 #include "protobuf.h"
 #include "images/pagemap.pb-c.h"
 
+#include "mtd.h"
+#include "../../mtd/mtd_proto.h"
+
 static int task_reset_dirty_track(int pid)
 {
 	int ret;
@@ -42,7 +45,7 @@ static int task_reset_dirty_track(int pid)
 	if (!opts.track_mem)
 		return 0;
 
-	BUG_ON(!kdat.has_dirty_track);
+	BUG_ON(!kdat.has_dirty_track && mtd_connect());
 
 	ret = do_task_reset_dirty_track(pid);
 	BUG_ON(ret == 1);
@@ -132,10 +135,24 @@ u64 should_dump_page(pmc_t *pmc, VmaEntry *vmae, u64 vaddr, bool *softdirty)
 		}
 		if (vaddr < pmc->regs[pmc->regs_idx].start)
 			return pmc->regs[pmc->regs_idx].start;
-		if (softdirty)
-			*softdirty = pmc->regs[pmc->regs_idx].categories & PAGE_IS_SOFT_DIRTY;
+		if (softdirty) {
+			if (opts.track_mem && !kdat.has_dirty_track) {
+				if (!(vmae->status & (1 << 16))) {
+					*softdirty = true;
+				} else {
+					int ret = mtd_is_dirty(pmc->pid, vaddr);
+					if (ret == MTD_STATUS_DIRTY)
+						*softdirty = true;
+					else if (ret == MTD_STATUS_CLEAN)
+						*softdirty = false;
+					else
+						*softdirty = pmc->regs[pmc->regs_idx].categories & PAGE_IS_SOFT_DIRTY;
+				}
+			} else
+				*softdirty = pmc->regs[pmc->regs_idx].categories & PAGE_IS_SOFT_DIRTY;
+		}
 		return vaddr;
-	} else {
+		} else {
 		u64 pme = pmc->map[PAGE_PFN(vaddr - pmc->start)];
 
 		/*
@@ -145,11 +162,24 @@ u64 should_dump_page(pmc_t *pmc, VmaEntry *vmae, u64 vaddr, bool *softdirty)
 		if (vma_entry_is(vmae, VMA_FILE_PRIVATE) && (pme & PME_FILE))
 			return vaddr + PAGE_SIZE;
 		if ((pme & (PME_PRESENT | PME_SWAP)) && !__page_is_zero(pme)) {
-			if (softdirty)
-				*softdirty = pme & PME_SOFT_DIRTY;
+			if (softdirty) {
+				if (opts.track_mem && !kdat.has_dirty_track) {
+					if (!(vmae->status & (1 << 16))) {
+						*softdirty = true;
+					} else {
+						int ret = mtd_is_dirty(pmc->pid, vaddr);
+						if (ret == MTD_STATUS_DIRTY)
+							*softdirty = true;
+						else if (ret == MTD_STATUS_CLEAN)
+							*softdirty = false;
+						else
+							*softdirty = pme & PME_SOFT_DIRTY;
+					}
+				} else 
+					*softdirty = pme & PME_SOFT_DIRTY;
+			}
 			return vaddr;
 		}
-
 		return vaddr + PAGE_SIZE;
 	}
 }

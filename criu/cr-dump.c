@@ -2254,6 +2254,9 @@ static int mem_unmap(pid_t pid, int num_lines) {
 	return ret;
 }
 
+#include "mtd.h"
+#include "../../mtd/mtd_proto.h"
+
 static int cr_mem_dump_finish(int status)
 {
 	InventoryEntry he = INVENTORY_ENTRY__INIT;
@@ -2294,6 +2297,12 @@ static int cr_mem_dump_finish(int status)
 	num_lines = count_maps_lines(root_item->pid->real);
 	if (num_lines < 0)
 		return -1;
+	
+	if (opts.track_mem && !kdat.has_dirty_track && mtd_clear(root_item->pid->real) < 0) {
+		pr_err("Can't clear mtd record for pid %d\n", root_item->pid->real);
+		return -1;
+	}
+	
 	ret = mem_unmap(root_item->pid->real, num_lines);
 	if (ret)
 		goto err;
