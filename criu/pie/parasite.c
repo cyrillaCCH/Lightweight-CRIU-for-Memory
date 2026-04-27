@@ -875,8 +875,16 @@ static int parasite_restore_file_priv_vmas(struct mem_rst_args *args)
 
 static int parasite_restore_memory(struct mem_rst_args *args)
 {
-	struct iovec iov = { args->addr, PAGE_SIZE * args->nr_pages };
-	sys_vmsplice(args->pipe_fd, &iov, 1, 0);
+	size_t len = PAGE_SIZE * (args->nr_pages - args->nr_zero_pages_tail);
+	struct iovec iov = { args->addr, len };
+	if (sys_vmsplice(args->pipe_fd, &iov, 1, 0) != len) {
+		pr_err("Can't vmsplice pages from pipe\n");
+		return -1;
+	}
+	if (sys_madvise((size_t)args->addr + len, PAGE_SIZE * args->nr_zero_pages_tail, MADV_DONTNEED)) {
+		pr_err("Can't set MADV_DONTNEED\n");
+		return -1;
+	}
 
 	return 0;
 }

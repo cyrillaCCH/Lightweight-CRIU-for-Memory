@@ -336,7 +336,7 @@ static int write_pagemap_loc(struct page_xfer *xfer, struct iovec *iov, u32 flag
 			}
 		}
 	} else if (flags & PE_PARENT) {
-		if (xfer->parent != NULL) {
+		if (xfer->parent != NULL && opts.mode != CR_MEM_DUMP) {
 			ret = check_pagehole_in_parent(xfer->parent, iov);
 			if (ret) {
 				pr_err("Hole %p/%zu not found in parent\n", iov->iov_base, iov->iov_len);

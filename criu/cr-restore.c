@@ -2617,13 +2617,17 @@ static int restore_page_content(struct parasite_ctl *ctl, struct mem_rst_args *a
 
 		for (j = 0; j < nr_pages; j++) {
 			int nr = min_t(int, nr_pages - j, pipe_max_len / PAGE_SIZE);
+			int nr_pagees_left = 0;
+			int nr_zero_pages_tail = 0;
 
-			ret = read_local_page_to_pipe(&pr, va, nr, page_pipe[1], 0);
+			ret = read_pagemap_page_to_pipe(&pr, va, nr, page_pipe[1], &nr_zero_pages_tail, &nr_pagees_left);
 			if (ret < 0)
 				goto err;
 
+			nr -= nr_pagees_left;
 			arg->addr = decode_pointer(va);
 			arg->nr_pages = nr;
+			arg->nr_zero_pages_tail = nr_zero_pages_tail;
 
 			pr_debug("Restore %u pages of VMA %d at address %p\n", nr, i, arg->addr);
 

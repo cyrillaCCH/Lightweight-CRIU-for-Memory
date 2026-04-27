@@ -105,6 +105,7 @@ struct mem_rst_args
 		struct {
 			void *addr;
 			int nr_pages;
+			int nr_zero_pages_tail;
 			int pipe_fd;
 		};
 		struct {

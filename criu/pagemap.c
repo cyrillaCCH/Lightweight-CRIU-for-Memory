@@ -492,32 +492,29 @@ static int read_pagemap_page(struct page_read *pr, unsigned long vaddr, int nr, 
 	return 1;
 }
 
-int read_local_page_to_pipe(struct page_read *pr, unsigned long vaddr, int nr, int pipe_fd, unsigned flags) {
-	ssize_t ret = -1;
-	unsigned long len = nr * PAGE_SIZE;
+static int read_local_page_to_pipe(struct page_read *pr, unsigned long vaddr, unsigned long len, int pipe_fd)
+{
 	int fd;
+	ssize_t ret;
 	size_t curr = 0;
 	off_t off;
-
-	pr_info("pr%lu-%u Read %lx %u pages\n", pr->img_id, pr->id, vaddr, nr);
-	pagemap_bound_check(pr->pe, vaddr, nr);
 
 	fd = img_raw_fd(pr->pi);
 	if (fd < 0) {
 		pr_err("Failed getting raw image fd\n");
-		goto err;
+		return -1;
 	}
 
 	if (pr->sync(pr))
-		goto err;
+		return -1;
 
-	pr_debug("\tpr%lu-%u Read %d pages from self %lx/%" PRIx64 "\n", pr->img_id, pr->id, nr, pr->cvaddr, pr->pi_off);
+	pr_debug("\tpr%lu-%u Read page from self %lx/%" PRIx64 "\n", pr->img_id, pr->id, pr->cvaddr, pr->pi_off);
 	while (1) {
 		off = pr->pi_off + curr;
 		ret = splice(fd, &off, pipe_fd, NULL, len - curr, SPLICE_F_MOVE);
 		if (ret < 1) {
 			pr_perror("Can't read mapping page %zd", ret);
-			goto err;
+			return -1;
 		}
 		curr += ret;
 		if (curr == len)
@@ -527,17 +524,79 @@ int read_local_page_to_pipe(struct page_read *pr, unsigned long vaddr, int nr, i
 	if (opts.auto_dedup && !pr->disable_dedup) {
 		ret = punch_hole(pr, pr->pi_off, len, false);
 		if (ret == -1)
-			goto err;
+			return -1;
 	}
 
-err:
+	return 0;
+}
+
+static int maybe_read_page_local_to_pipe(struct page_read *pr, unsigned long vaddr, int nr, int pipe_fd)
+{
+	int ret;
+	unsigned long len = nr * PAGE_SIZE;
+
+	ret = read_local_page_to_pipe(pr, vaddr, len, pipe_fd);
 	if (ret == 0 && pr->io_complete)
 		ret = pr->io_complete(pr, vaddr, nr);
 
 	pr->pi_off += len;
 
-	if (ret < 0)
-		return ret;
+	return ret;
+}
+
+static int read_parent_page_to_pipe(struct page_read *pr, unsigned long vaddr, int nr, int pipe_fd, int *nr_zero_pages_tail, int *nr_pagees_left)
+{
+	struct page_read *ppr = pr->parent;
+	int ret;
+
+	if (!ppr) {
+		pr_err("No parent for snapshot pagemap\n");
+		return -1;
+	}
+
+	do {
+		int p_nr;
+
+		pr_debug("\tpr%lu-%u Read from parent\n", pr->img_id, pr->id);
+		ret = ppr->seek_pagemap(ppr, vaddr);
+		if (ret > 0) {
+			if (*nr_zero_pages_tail) {
+				*nr_pagees_left = nr;
+				break;
+			}
+
+			p_nr = ppr->pe->nr_pages - (vaddr - ppr->pe->vaddr) / PAGE_SIZE;
+			pr_info("\tparent has %u pages in\n", p_nr);
+			if (p_nr > nr)
+				p_nr = nr;
+
+			ret = read_pagemap_page_to_pipe(ppr, vaddr, p_nr, pipe_fd, nr_zero_pages_tail, nr_pagees_left);
+			if (ret == -1)
+				return ret;
+		} else {
+			pr_info("Skip 1 page\n");
+			p_nr = 1;
+			(*nr_zero_pages_tail)++;
+		}
+
+		nr -= p_nr;
+		vaddr += p_nr * PAGE_SIZE;
+	} while (nr);
+
+	return 0;
+}
+
+int read_pagemap_page_to_pipe(struct page_read *pr, unsigned long vaddr, int nr, int pipe_fd, int *nr_zero_pages_tail, int *nr_pagees_left) {
+	pr_info("pr%lu-%u Read %lx %u pages\n", pr->img_id, pr->id, vaddr, nr);
+	pagemap_bound_check(pr->pe, vaddr, nr);
+
+	if (pagemap_in_parent(pr->pe)) {
+		if (read_parent_page_to_pipe(pr, vaddr, nr, pipe_fd, nr_zero_pages_tail, nr_pagees_left) < 0)
+			return -1;
+	} else {
+		if (maybe_read_page_local_to_pipe(pr, vaddr, nr, pipe_fd) < 0)
+			return -1;
+	}
 
 	pr->cvaddr += nr * PAGE_SIZE;
 

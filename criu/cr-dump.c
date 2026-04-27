@@ -2325,6 +2325,7 @@ err:
 
 int cr_mem_dump_tasks(pid_t pid)
 {
+	InventoryEntry *parent_ie = NULL;
 	int ret = -1;
 
 	/*
@@ -2336,11 +2337,6 @@ int cr_mem_dump_tasks(pid_t pid)
 	if (!root_item)
 		goto err;
 	root_item->pid->real = pid;
-
-	if (opts.track_mem) {
-		pr_info("Enforcing disable memory tracking for mem-dump.\n");
-		opts.track_mem = false;
-	}
 
 	if (opts.final_state != TASK_STOPPED) {
 		pr_info("Enforcing tasks stop after mem-dump.\n");
@@ -2373,12 +2369,14 @@ int cr_mem_dump_tasks(pid_t pid)
 
 	if (collect_namespaces(false) < 0)
 		goto err;
+	
+	parent_ie = get_parent_inventory();
 
 	glob_imgset = cr_glob_imgset_open(O_DUMP);
 	if (!glob_imgset)
 		goto err;
 
-	if (mem_dump_one_task(root_item, NULL))
+	if (mem_dump_one_task(root_item, parent_ie))
 		goto err;
 
 	if (irmap_predump_prep())
