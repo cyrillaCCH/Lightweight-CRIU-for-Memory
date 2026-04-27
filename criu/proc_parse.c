@@ -811,16 +811,17 @@ int parse_smaps(pid_t pid, struct vm_area_list *vma_area_list, dump_filemap_t du
 
 		if (!eof && !__is_vma_range_fmt(str)) {
 			if (!strncmp(str, "VmFlags: ", 9)) {
-				// BUG_ON(!vma_area);
+#ifdef ANDROID
 				if (vma_area) // Skip some strange VMAs on Android
 					parse_vma_vmflags(&str[9], vma_area);
+#else
+				BUG_ON(!vma_area);
+				parse_vma_vmflags(&str[9], vma_area);
+#endif
 				continue;
 			} else
 				continue;
 		}
-
-		if (vma_area && vma_list_add(vma_area, vma_area_list, &prev_end, &vfi, &prev_vfi))
-			goto err;
 
 		if (eof)
 			break;
@@ -890,6 +891,9 @@ int parse_smaps(pid_t pid, struct vm_area_list *vma_area_list, dump_filemap_t du
 			if (handle_vma(pid, vma_area, str + path_off, map_files_dir, &vfi, &prev_vfi, &vm_file_fd))
 				goto err;
 		}
+
+		if (vma_area && vma_list_add(vma_area, vma_area_list, &prev_end, &vfi, &prev_vfi))
+			goto err;
 
 		if (vma_entry_is(vma_area->e, VMA_FILE_PRIVATE) || vma_entry_is(vma_area->e, VMA_FILE_SHARED)) {
 			if (dump_filemap && dump_filemap(vma_area, vm_file_fd))
