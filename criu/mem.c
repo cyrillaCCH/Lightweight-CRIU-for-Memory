@@ -369,6 +369,11 @@ static int detect_pid_reuse(struct pstree_item *item, struct proc_pid_stat *pps,
 			return -1;
 	}
 
+	if (!parent_ie->has_dump_uptime) {
+		pr_warn("Parent inventory has no dump_uptime, skipping PID reuse check via uptime\n");
+		return 0;
+	}
+
 	dump_ticks = parent_ie->dump_uptime / (USEC_PER_SEC / tps);
 
 	if (pps->start_time >= dump_ticks) {

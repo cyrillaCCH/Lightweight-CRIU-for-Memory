@@ -328,9 +328,7 @@ InventoryEntry *get_parent_inventory(void)
 	}
 
 	if (!ie->has_dump_uptime) {
-		pr_warn("Parent pre-dump inventory has no uptime\n");
-		inventory_entry__free_unpacked(ie, NULL);
-		ie = NULL;
+		pr_warn("Parent pre-dump inventory has no uptime. Continuing anyway.\n");
 	}
 
 	close_image(img);
