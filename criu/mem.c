@@ -416,7 +416,8 @@ static int detect_pid_reuse(struct pstree_item *item, struct proc_pid_stat *pps,
 
 static int generate_vma_iovs(struct pstree_item *item, struct vma_area *vma, struct page_pipe *pp,
 			     struct page_xfer *xfer, struct parasite_dump_pages_args *args, struct parasite_ctl *ctl,
-			     pmc_t *pmc, bool has_parent, bool pre_dump, int parent_predump_mode)
+			     pmc_t *pmc, bool has_parent, bool pre_dump, int parent_predump_mode,
+			     unsigned long *total_pages)
 {
 	u64 vaddr;
 	int ret;
@@ -502,6 +503,9 @@ again:
 	if (ret == -EAGAIN) {
 		BUG_ON(!(pp->flags & PP_CHUNK_MODE));
 
+		if (total_pages)
+			*total_pages += page_pipe_pages_in(pp);
+
 		ret = drain_pages(pp, ctl, args);
 		if (!ret)
 			ret = xfer_pages(pp, xfer);
@@ -528,6 +532,7 @@ static int __parasite_dump_pages_seized(struct pstree_item *item, struct parasit
 	int possible_pid_reuse = 0;
 	bool has_parent;
 	int parent_predump_mode = -1;
+	unsigned long total_pages = 0;
 
 	pr_info("\n");
 	pr_info("Dumping pages (type: %d pid: %d)\n", CR_FD_PAGES, item->pid->real);
@@ -595,7 +600,7 @@ static int __parasite_dump_pages_seized(struct pstree_item *item, struct parasit
 			continue;
 
 		ret = generate_vma_iovs(item, vma_area, pp, &xfer, args, ctl, &pmc, has_parent, mdc->pre_dump,
-					parent_predump_mode);
+					parent_predump_mode, &total_pages);
 		if (ret < 0)
 			goto out_xfer;
 	}
@@ -620,6 +625,18 @@ static int __parasite_dump_pages_seized(struct pstree_item *item, struct parasit
 		goto out_xfer;
 
 	timing_stop(TIME_MEMDUMP);
+	total_pages += page_pipe_pages_in(pp);
+	{
+		uint32_t time_us = timing_total(TIME_MEMDUMP);
+		uint64_t total_size = (uint64_t)total_pages * PAGE_SIZE;
+		uint64_t throughput = 0;
+
+		if (time_us > 0)
+			throughput = (total_size * 1000000) / (time_us * 1024 * 1024);
+
+		pr_msg("Dump pages total time: %u us, size: %" PRIu64 " bytes, throughput: %" PRIu64 " MB/s\n",
+		       time_us, total_size, throughput);
+	}
 
 	/*
 	 * Step 4 -- clean up

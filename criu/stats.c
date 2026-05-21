@@ -112,12 +112,16 @@ void timing_stop(int t)
 
 static void encode_time(int t, u_int32_t *to)
 {
-	struct timing *tm;
-
-	tm = get_timing(t);
-	*to = tm->total.tv_sec * USEC_PER_SEC + tm->total.tv_usec;
+        *to = timing_total(t);
 }
 
+u_int32_t timing_total(int t)
+{
+        struct timing *tm;
+
+        tm = get_timing(t);
+        return tm->total.tv_sec * USEC_PER_SEC + tm->total.tv_usec;
+}
 static void display_stats(int what, StatsEntry *stats)
 {
 	if (what == DUMP_STATS) {

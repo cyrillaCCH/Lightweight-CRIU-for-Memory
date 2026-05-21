@@ -2510,7 +2510,8 @@ static int restore_file_vmas(struct parasite_ctl *ctl, struct mem_rst_args *arg,
 	return 0;
 }
 
-static int restore_page_content(struct parasite_ctl *ctl, struct mem_rst_args *arg, MmEntry *mm, int num_lines, void *addr[][2], pid_t pid) {
+static int restore_page_content(struct parasite_ctl *ctl, struct mem_rst_args *arg, 
+							MmEntry *mm, int num_lines, void *addr[][2], pid_t pid, unsigned int *nr_restored_pages) {
 	int i, j;
 	long ret = -1;
 	struct page_read pr;
@@ -2616,6 +2617,7 @@ static int restore_page_content(struct parasite_ctl *ctl, struct mem_rst_args *a
 		}
 	}
 
+	*nr_restored_pages = nr_restored;
 	ret = 0;
 	pr_info("nr_restored_pages: %d\n", nr_restored);
 
@@ -2662,6 +2664,7 @@ static int restore_memory(pid_t pid)
 	long ret;
 	MmEntry *mm;
 	struct mem_rst_args *arg;
+	unsigned int nr_restored_pages = 0;
 
 	memset(addr, 0, sizeof(void*) * num_lines * 2);
 	if (parse_maps_restore(pid, addr)) // must parse before infection
@@ -2711,10 +2714,25 @@ static int restore_memory(pid_t pid)
 	if (restore_file_vmas(ctl, arg, mm, num_lines, addr) < 0)
 		return -1;
 
+	timing_start(TIME_MEMRST);
+
 	// Read the content of pages
 	pr_info("Restore page content\n");
-	if (restore_page_content(ctl, arg, mm, num_lines, addr, pid) < 0)
+	if (restore_page_content(ctl, arg, mm, num_lines, addr, pid, &nr_restored_pages) < 0)
 		return -1;
+
+	timing_stop(TIME_MEMRST);
+	{
+		uint32_t time_us = timing_total(TIME_MEMRST);
+		uint64_t total_size = (uint64_t)nr_restored_pages * PAGE_SIZE;
+		uint64_t throughput = 0;
+
+		if (time_us > 0)
+			throughput = (total_size * 1000000) / (time_us * 1024 * 1024);
+
+		pr_msg("Restore pages total time: %u us, size: %" PRIu64 " bytes, throughput: %" PRIu64 " MB/s\n",
+		       time_us, total_size, throughput);
+	}
 
 	if (restore_vma_settings(ctl, arg, mm, num_lines, addr) < 0)
 		return -1;

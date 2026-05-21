@@ -15,11 +15,14 @@ enum {
 	TIME_FORK,
 	TIME_RESTORE,
 
+	TIME_MEMRST,
+
 	RESTORE_TIME_NS_STATS,
 };
 
 extern void timing_start(int t);
 extern void timing_stop(int t);
+extern u_int32_t timing_total(int t);
 
 enum {
 	CNT_PAGES_SCANNED,
