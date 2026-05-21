@@ -2719,7 +2719,7 @@ static int restore_memory(pid_t pid)
 	if (restore_vma_settings(ctl, arg, mm, num_lines, addr) < 0)
 		return -1;
 
-	if (mtd_connect() == 0) {
+	if (opts.track_mem && !kdat.has_dirty_track && mtd_connect() == 0) {
 		int uffd;
 		struct uffdio_api api = { 0 };
 
