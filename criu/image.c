@@ -793,7 +793,7 @@ struct cr_img *open_pages_image_at(int dfd, unsigned long flags, struct cr_img *
 			return NULL;
 	}
 
-	return open_image_at(dfd, CR_FD_PAGES, flags, *id);
+	return open_image_at(dfd, CR_FD_PAGES, flags | (opts.mem_nobuf ? O_NOBUF : 0), *id);
 }
 
 struct cr_img *open_pages_image(unsigned long flags, struct cr_img *pmi, u32 *id)

@@ -905,7 +905,7 @@ int open_page_read_at(int dfd, unsigned long img_id, struct page_read *pr, int p
 	pr->pieok = false;
 	pr->disable_dedup = false;
 
-	pr->pmi = open_image_at(dfd, i_typ, O_RSTR, img_id);
+	pr->pmi = open_image_at(dfd, i_typ, O_RSTR | (opts.mem_nobuf ? O_NOBUF : 0), img_id);
 	if (!pr->pmi)
 		return -1;
 
