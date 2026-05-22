@@ -627,14 +627,14 @@ static int __parasite_dump_pages_seized(struct pstree_item *item, struct parasit
 	timing_stop(TIME_MEMDUMP);
 	total_pages += page_pipe_pages_in(pp);
 	{
-		uint32_t time_us = timing_total(TIME_MEMDUMP);
+		uint64_t time_us = timing_total(TIME_MEMDUMP);
 		uint64_t total_size = (uint64_t)total_pages * PAGE_SIZE;
-		uint64_t throughput = 0;
+		double throughput = 0;
 
 		if (time_us > 0)
-			throughput = (total_size * 1000000) / (time_us * 1024 * 1024);
+			throughput = (double)(total_size * 1000000) / (time_us * 1024 * 1024);
 
-		pr_msg("Dump pages total time: %u us, size: %" PRIu64 " bytes, throughput: %" PRIu64 " MB/s\n",
+		pr_msg("Dump pages total time: %" PRIu64 " us, size: %" PRIu64 " bytes, throughput: %.2f MB/s\n",
 		       time_us, total_size, throughput);
 	}
 
